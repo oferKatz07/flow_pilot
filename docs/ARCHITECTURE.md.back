@@ -1,0 +1,88 @@
+# FlowPilot Architecture
+
+This document describes the current architecture, key components, async design choices, persistence model, testing approach, and recommended next steps for FlowPilot.
+
+## High-level overview
+
+FlowPilot is a C++20-based workflow orchestration service focused on asynchronous IO and durable persistence. The primary components are:
+
+- API Gateway (Boost.Beast): accepts HTTP requests and forwards them to the Workflow Service.
+- Workflow Service: admission, validation (JSON schema + semantic), DAG construction, persistence, and admission control.
+- Redis: coordination layer used for queueing, locks, and lightweight coordination between processes.
+- SQLite: durable storage for workflows, requests, and execution metadata. An async wrapper provides coroutine-friendly APIs.
+- Scheduler / Queue: picks ready jobs and dispatches to workers.
+- Workers / Executors: execute jobs and report status.
+
+```
+API Gateway (Boost.Beast) --> Workflow Service --> { Redis, SQLite }
+                                     |
+                                     v
+                              Scheduler / Workers
+```
+
+## Key design points
+
+- Async-first: Network and coordination layers are coroutine-friendly using Boost.Asio awaitable APIs. This minimizes thread-blocking and simplifies async flow.
+- Separation of sync/IO: Blocking operations (SQLite) are executed on a dedicated thread-pool and exposed via awaitable APIs (`AsyncSQLiteDatabase`).
+- Test isolation: The Redis client was refactored to allow test-local construction (avoids global singletons capturing short-lived io_contexts). SQLite tests use in-memory databases for determinism.
+- Incremental build: project sources (all .cpp except `src/main.cpp`) are compiled into `flow_pilot_lib`, and both the application and tests link against it for faster incremental builds.
+
+## Async & Concurrency model
+
+- Network: `Boost.Asio` with `co_await` + `use_awaitable` is used for non-blocking networking.
+- Redis: `RedisDatabase` now provides awaitable APIs for async operations. It can be constructed with a provided `io_context` so tests can control reactor lifetimes.
+- SQLite: `SQLiteDatabase` is synchronous (SQLite C API). To integrate with coroutines, `AsyncSQLiteDatabase` posts blocking calls onto a `boost::asio::thread_pool` and returns results as awaitables.
+
+Typical pattern:
+
+1. HTTP request received on `io_context`.
+2. Validation + admission on `WorkflowService` (may involve schema validation and semantic checks).
+3. Persist in SQLite via `AsyncSQLiteDatabase::add_workflow_async(...)` (co_awaitable).
+4. Publish admission message / queue entry to Redis (awaitable API) if configured.
+5. Scheduler consumes queue messages and dispatches to workers.
+
+## Persistence and transactions
+
+- SQLite is the source of truth for persisted workflows and requests. Recent work improved transaction handling (explicit `BEGIN`/`COMMIT` and rollback helpers) around `add_workflow` and related operations.
+- Use `:memory:` for isolated unit tests. Production runs should use a file-backed DB and consider WAL mode for concurrency.
+
+## Testing
+
+- Unit tests: GoogleTest-based tests live under `tests/`. Async SQLite tests demonstrate coroutine usage and currently pass in local runs.
+- Integration tests: require a running Redis. Recommend using `docker run --rm -p 6379:6379 redis:7` in CI or locally when running integration tests.
+- Build layout: `flow_pilot_lib` is linked into both `flow_pilot` and `flow_pilot_tests` to reduce duplication and speed up builds.
+
+## Recommended development & CI workflow
+
+- Local development:
+
+```bash
+cmake -B build
+cmake --build build --target flow_pilot_tests
+cd build
+ctest --output-on-failure
+```
+
+- Run integration tests with Redis:
+
+```bash
+docker run -p 6379:6379 --rm redis:7
+ctest --output-on-failure -R integration
+```
+
+## Operational considerations
+
+- Ensure `io_context` lifetimes exceed the lifetime of services bound to them (Redis client, sockets). Tests should construct and run their own `io_context` instances where needed.
+- Consider using SQLite WAL mode for higher concurrency and durability under parallel readers/writers.
+- For production, run a dedicated Redis cluster (or cloud service) and configure connection resilience and timeouts.
+
+## Next steps
+
+- Add integration tests that automatically spin up a Redis instance (Docker Compose) before the test stage and tear it down afterward.
+- Harden API gateway paths and add request throttling and circuit-breaker semantics.
+- Implement worker autoscaling and scheduler HA (coordinator) for distributed deployments.
+- Add observability (Prometheus metrics, structured tracing) and a runbook for recovery.
+
+---
+
+Document created on: 2026-06-02
