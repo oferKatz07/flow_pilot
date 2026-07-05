@@ -42,15 +42,15 @@ if(NOT NLOHMANN_JSON_SCHEMA_VALIDATOR_LIB)
 endif()
 
 set(FLOW_PILOT_SOURCES
-    src/http_server.cpp
-    src/workflow_service.cpp
-    src/redis_db.cpp
+    src/logger.cpp
+    src/redis_db_async.cpp
     src/sqlite_db.cpp
     src/db_factory.cpp
     src/async_db.cpp
     src/client_data_manager.cpp
-    src/logger.cpp
     src/request_handlers.cpp
+    src/http_server.cpp
+    src/workflow_service.cpp
 )
 
 # Build a library from all project sources (exclude main.cpp)

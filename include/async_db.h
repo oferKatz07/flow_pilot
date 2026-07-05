@@ -23,6 +23,15 @@ public:
     // Get the singleton instance. Throws if not initialized.
     static IAsyncDatabase& get_instance();
 
+    boost::asio::awaitable<bool> add_request_async(
+        const RequestData& request_data,
+        std::string& error_message) override;
+
+    boost::asio::awaitable<bool> add_request_async(
+        const RequestData& request_data,
+        const int max_requests,
+        std::string& error_message) override;
+
     boost::asio::awaitable<bool> add_workflow_async(
         const RequestData& workflow_data,
         const std::string& workflow_payload,

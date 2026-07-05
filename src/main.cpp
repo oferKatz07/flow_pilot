@@ -5,7 +5,7 @@
 #include "workflow_service.h"
 #include "config.h"
 #include "logger.h"
-#include "redis_db.h"
+#include "redis_db_async.h"
 #include "db_factory.h"
 #include <boost/asio/signal_set.hpp>
 #include <boost/asio/io_context.hpp>
@@ -48,7 +48,7 @@ int main(int argc, char* argv[])
         flow_pilot::get_logger()->info("Redis endpoint {}:{}", redis_config.host, redis_config.port);
 
         boost::asio::io_context ioc;
-        flow_pilot::init_redis_database(ioc, redis_config);
+        flow_pilot::RedisDatabaseAsync::init(ioc, redis_config);
         flow_pilot::get_logger()->info("Redis initialized successfully");
 
         std::string redis_connection = redis_config.host + ":" + std::to_string(redis_config.port);
