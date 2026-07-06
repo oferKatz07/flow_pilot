@@ -41,3 +41,33 @@
 [2026-06-07 12:33:43] [warning] Redis not available — skipping admission/ratelimit checks
 [2026-06-07 12:33:43] [error] Duplicate request: request id=req-123 client_id=client_1
 [2026-06-07 12:33:43] [error] Duplicate request: request id=req-dup client_id=dup-client
+[2026-07-04 08:17:15] [error] Redis execute_command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis execute_command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis execute_command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [info] Inserted default rate/policy plans and clients into SQLite database
+[2026-07-04 08:17:15] [error] Duplicate request: request id=req-9652829407147040073 client_id=client_1
+[2026-07-04 08:17:15] [error] Redis bulk string command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis bulk string command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis Lua script failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis integer command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis integer command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis Lua script failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis Lua script failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis integer command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis Lua script failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis Lua script failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Redis bulk string command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:17:15] [error] Duplicate request: request id=req-dup client_id=dup-client
+[2026-07-04 08:46:12] [error] Redis execute_command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Redis execute_command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Redis execute_command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [info] Inserted default rate/policy plans and clients into SQLite database
+[2026-07-04 08:46:12] [error] Duplicate request: request id=req-5471249278612410924 client_id=client_1
+[2026-07-04 08:46:12] [error] Redis bulk string command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Redis bulk string command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Redis Lua script failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Redis integer command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Redis integer command failed: read_until: Resource temporarily unavailable [system:11]
+[2026-07-04 08:46:12] [error] Duplicate request: request id=req-dup client_id=dup-client
+[2026-07-04 08:46:54] [info] Inserted default rate/policy plans and clients into SQLite database
+[2026-07-04 08:46:54] [error] Duplicate request: request id=req-dup client_id=dup-client

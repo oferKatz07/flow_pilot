@@ -10,7 +10,7 @@
 #include "client_data.h"
 #include "config.h"
 #include "client_data_manager.h"
-#include "redis_db.h"
+#include "redis_db_async.h"
 #include "db_factory.h"
 #include "workflow_service.h"
 
@@ -65,20 +65,21 @@ WorkflowService::WorkflowService(const std::string& schema_path)
         };
     }
 
-    RequestData workflow_info;
-    workflow_info.client_id = workflow_data.value("client_id", std::string());
-    workflow_info.request_id = workflow_data.value("request_id", std::string());
-    workflow_info.workflow_id = workflow_data.value("workflow_id", std::string());
+    RequestData workflow_request_info;
+    workflow_request_info.client_id = workflow_data.value("client_id", std::string());
+    workflow_request_info.request_id = workflow_data.value("request_id", std::string());
+    workflow_request_info.workflow_id = workflow_data.value("workflow_id", std::string());
+    workflow_request_info.workflow_payload_size_bytes = static_cast<int>(body.size());
+    workflow_request_info.operation = "CREATE";
 //    workflow_info.workflow_type = workflow_data.value("workflow_type", std::string());
 //    workflow_info.job_count = static_cast<int>(workflow_data["jobs"].size());
-    workflow_info.workflow_size_bytes = static_cast<int>(body.size());
 //    workflow_info.workflow_version = Config::get_config().workflow().version;
 //    to_string(WorkflowStatus::ADMITTED, workflow_info.status);
 
     // Get client config from DB for policy and rate limit validation
     // If client is not found, the assumption is that the client is not registered and the request is rejected
     ClientConfig client_config;
-    if (!get_client_config(workflow_info.client_id, client_config)) {
+    if (!get_client_config(workflow_request_info.client_id, client_config)) {
         co_return ValidationResult{
             false,
             CLIENT_NOT_FOUND,
@@ -101,18 +102,25 @@ WorkflowService::WorkflowService(const std::string& schema_path)
     std::string rejection_reason;
     std::string reject_status;
     to_string(WorkflowStatus::REJECTED, reject_status);
-    auto redis_db = RedisDatabase::get_instance();
-    bool res = co_await redis_db->admit_request_async(workflow_info.client_id,
-                                                      workflow_info.request_id,
-                                                      workflow_info.workflow_id,  
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    bool res = co_await redis_db->admit_request_async(workflow_request_info.client_id,
+                                                      workflow_request_info.request_id,
+                                                      workflow_request_info.workflow_id,  
                                                       client_config.rate_limit_config.max_concurrent_workflows,  
                                                       client_config.rate_limit_config.max_requests,  
                                                       client_config.rate_limit_config.window_sec,  
                                                       rejection_reason);  
     if (!res) {
-            result.valid = false;
-            result.message = rejection_reason;
-            result.errors = rejection_reason;
+        result.valid = false;
+        result.message = rejection_reason;
+        result.errors = rejection_reason;
+
+        if (rejection_reason != DUPLICATE_REQUEST) {
+            // Persist the failed request in the DB for auditing purposes
+            workflow_request_info.status = reject_status;
+            workflow_request_info.reject_reason = rejection_reason;
+            co_await DBFactory::get_database().add_request_async(workflow_request_info, body, rejection_reason);
+        }
 
         co_return result;
     }
@@ -121,35 +129,35 @@ WorkflowService::WorkflowService(const std::string& schema_path)
     validate_semantic(workflow_data, jobs_map, result);
     if (!result.valid) {
         // Update request status in Redis since semantic validation failed
-        update_redis_request_status(workflow_info.client_id, workflow_info.request_id, reject_status);
+        std::ignore = update_redis_request_status(workflow_request_info.client_id, workflow_request_info.request_id, reject_status);
         co_return result;
     }
 
     validate_dependencies(workflow_data, jobs_map, result);
     if (!result.valid) {
         // Update request status in Redis since dependency validation failed
-        update_redis_request_status(workflow_info.client_id, workflow_info.request_id, reject_status);
+        std::ignore = update_redis_request_status(workflow_request_info.client_id, workflow_request_info.request_id, reject_status);
         co_return result;
     }
 
     // Add the workflow request record to the DB for durability and auditing
     std::string error_message;
-    if (!co_await DBFactory::get_database().add_workflow_async(workflow_info, body, error_message)) {
+    if (!co_await DBFactory::get_database().add_workflow_async(workflow_request_info, error_message)) {
         result.valid = false;
         result.message = std::move(error_message);
         result.errors = "Failed to add workflow to the database";
 
         // Update request status in Redis since DB insertion failed
-        update_redis_request_status(workflow_info.client_id, workflow_info.request_id, reject_status);
+        std::ignore = update_redis_request_status(workflow_request_info.client_id, workflow_request_info.request_id, reject_status);
 
         co_return result;
     }
 
-    if (!co_await redis_db->update_request_status_async(workflow_info.client_id, 
-                                                        workflow_info.request_id, 
-                                                        workflow_info.status)) {
+    if (!co_await redis_db->update_request_status_async(workflow_request_info.client_id, 
+                                                        workflow_request_info.request_id, 
+                                                        workflow_request_info.status)) {
         Logger::get_instance()->warn("Failed to update Redis request status for {}/{}", 
-                                     workflow_info.client_id, workflow_info.request_id);
+                                     workflow_request_info.client_id, workflow_request_info.request_id);
     }
 
     co_return result;
@@ -269,13 +277,12 @@ void WorkflowService::validate_dependencies(const json& data, std::unordered_map
 }
 
 awaitable<void> WorkflowService::update_redis_request_status(const std::string& client_id, const std::string& request_id, const std::string& status) {
-    auto redis_db = RedisDatabase::get_instance();
-    if (!co_await redis_db->update_request_status_async(client_id, request_id, status)) {
+    if (!co_await RedisDatabaseAsync::get_instance()->update_request_status_async(client_id, request_id, status)) {
         Logger::get_instance()->warn("Failed to update Redis request status for {}/{}", client_id, request_id);
     }
 
     if(status != "ADMITTED") {
-        if (!co_await redis_db->release_request_id_async(client_id, request_id)) {
+        if (!co_await RedisDatabaseAsync::get_instance()->release_request_id_async(client_id, request_id)) {
             Logger::get_instance()->warn("Failed to release Redis request ID for {}/{}", client_id, request_id);
         }
     }

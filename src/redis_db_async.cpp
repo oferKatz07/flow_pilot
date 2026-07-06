@@ -216,21 +216,6 @@ private:
     mutable boost::asio::streambuf read_buffer_;
 };
 
-// boost::asio::awaitable<bool> RedisBase::execute_command_async(const std::vector<std::string>& args, RedisReply& reply) const
-// {
-//     try {
-//         reply = co_await impl_->execute_async(args);
-//         co_return true;
-//     } catch (const RedisParseException& ex) {
-//         auto logger = get_logger();
-//         logger->error("Redis execute_command_async parse error: {}", ex.what());
-//     } catch (const std::exception& ex) {
-//         auto logger = get_logger();
-//         logger->error("Redis execute_command_async failed: {}", ex.what());
-//     }
-//     co_return false;
-// }
-
 std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::instance_ = nullptr;
 std::once_flag RedisDatabaseAsync::init_flag_;
 

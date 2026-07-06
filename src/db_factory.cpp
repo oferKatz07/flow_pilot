@@ -5,8 +5,6 @@
 #include "async_db.h"
 #include "db_factory.h"
 
-
-
 namespace flow_pilot {
 
 DBFactory::DBFactory() {

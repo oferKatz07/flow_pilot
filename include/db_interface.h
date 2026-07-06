@@ -145,6 +145,7 @@ struct RequestData {
     std::string client_id;
     std::string request_id;
     std::string workflow_id;
+    int workflow_payload_size_bytes = 0;
     std::string operation;
     std::string status;
     std::string reject_reason;
@@ -168,7 +169,6 @@ struct workflow_payload_data {
     std::string client_id;
     std::string workflow_id;
     std::string payload;
-    int payload_size_bytes;
 };
 
 class IDatabase {
@@ -217,13 +217,13 @@ public:
     // Add a new received request
     virtual bool add_request(
         const RequestData& request_data,
+        const std::string& workflow_payload,
         std::string& error_message
     ) = 0;
 
     // Add a new workflow data to the DB. This is used for durability and auditing of workflow submissions.
     virtual bool add_workflow(
-        const RequestData& workflow_data,
-        const std::string& workflow_payload,
+        const WorkflowfullData& workflow_data,
         std::string& error_message
     ) = 0;
 

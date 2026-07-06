@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -66,12 +67,12 @@ public:
 
     bool add_request(
         const RequestData& request_data,
+        const std::string& workflow_payload,
         std::string& error_message
     ) override;
 
     bool add_workflow(
-        const RequestData& workflow_data,
-        const std::string& workflow_payload,
+        const WorkflowfullData& workflow_data,
         std::string& error_message
     ) override;
 
@@ -94,8 +95,15 @@ private:
     void create_workflow_requests_table();
     void create_jobs_table();
     void create_users_stats_table();
+    void create_workflow_payload_table();
     void create_table(const char* ddl_cmd);
+    bool rollback(const std::string& error_message);
+    bool execute_statement(
+        const char* sql,
+        const std::function<void(sqlite3_stmt*)>& binder,
+        const std::function<std::string(int, const char*)>& failure_handler);
     size_t get_client_active_requests(std::string& client_id);
+    bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
 
     std::string db_path_;
     sqlite3* db_ = nullptr;

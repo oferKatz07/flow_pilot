@@ -1,4 +1,3 @@
-
 // redis_db.cpp - Redis communication implementation for FlowPilot
 
 #include <boost/asio.hpp>
@@ -79,10 +78,7 @@ public:
 
 } // namespace
 
-std::shared_ptr<RedisDatabase> RedisDatabase::instance_ = nullptr;
-std::once_flag RedisDatabase::init_flag_;
-
-struct RedisDatabase::Impl {
+struct RedisBase::Impl {
     explicit Impl(boost::asio::io_context& ioc)
         : socket_(ioc), resolver_(ioc), read_buffer_() {}
 
@@ -102,13 +98,6 @@ struct RedisDatabase::Impl {
         boost::asio::connect(socket_, endpoints, ec);
         if (ec) {
             error_message = "Redis connect error: " + ec.message();
-            return false;
-        }
-
-        socket_.non_blocking(true, ec);
-        if (ec) {
-            error_message = "Failed to set Redis socket non-blocking: " + ec.message();
-            socket_.close(ec);
             return false;
         }
 
@@ -245,7 +234,7 @@ private:
                     } else if (element.type == RedisReply::Type::Integer) {
                         reply.array_value.emplace_back(std::to_string(element.integer_value));
                     } else {
-                        reply.array_value.emplace_back(std::nullopt);
+                        reply.array_value.emplace_back(std::string());
                     }
                 }
                 co_return reply;
@@ -327,7 +316,7 @@ private:
                     } else if (element.type == RedisReply::Type::Integer) {
                         reply.array_value.emplace_back(std::to_string(element.integer_value));
                     } else {
-                        reply.array_value.emplace_back(std::nullopt);
+                        reply.array_value.emplace_back(std::string());
                     }
                 }
                 return reply;
@@ -351,53 +340,13 @@ private:
     mutable boost::asio::streambuf read_buffer_;
 };
 
-RedisDatabase::RedisDatabase(boost::asio::io_context& ioc)
+RedisBase::RedisBase(boost::asio::io_context& ioc)
     : impl_(std::make_unique<Impl>(ioc))
 {}
 
-RedisDatabase::~RedisDatabase() = default;
+RedisBase::~RedisBase() = default;
 
-std::shared_ptr<RedisDatabase> RedisDatabase::init(boost::asio::io_context& ioc, const InMemoryDBConfig& config)
-{
-    std::call_once(init_flag_, [&]() {
-        auto instance = std::shared_ptr<RedisDatabase>(new RedisDatabase(ioc));
-        std::string connection_string = config.host + ":" + std::to_string(config.port);
-        if (!instance->connect(connection_string, config.password)) {
-            throw std::runtime_error("Unable to connect to Redis at " + connection_string);
-        }
-        instance_ = std::move(instance);
-    });
-
-    if (!instance_) {
-        throw std::runtime_error("RedisDatabase initialization failed");
-    }
-    return instance_;
-}
-
-std::shared_ptr<RedisDatabase> RedisDatabase::init(boost::asio::io_context& ioc)
-{
-    return init(ioc, Config::get_config().redis());
-}
-
-std::shared_ptr<RedisDatabase> RedisDatabase::get_instance()
-{
-    if (!instance_) {
-        throw std::runtime_error("RedisDatabase has not been initialized");
-    }
-    return instance_;
-}
-
-void init_redis_database(boost::asio::io_context& ioc, const InMemoryDBConfig& config)
-{
-    RedisDatabase::init(ioc, config);
-}
-
-inline std::shared_ptr<IRedisDatabase> get_redis_database()
-{
-    return RedisDatabase::get_instance();
-}
-
-bool RedisDatabase::connect(const std::string& connection_string, const std::string& password)
+bool RedisBase::connect(const std::string& connection_string, const std::string& password)
 {
     std::string host = "127.0.0.1";
     std::string port = "6379";
@@ -438,7 +387,7 @@ bool RedisDatabase::connect(const std::string& connection_string, const std::str
     return true;
 }
 
-bool RedisDatabase::reconnect()
+bool RedisBase::reconnect()
 {
     if (connection_string_.empty()) {
         return false;
@@ -446,7 +395,7 @@ bool RedisDatabase::reconnect()
     return connect(connection_string_, password_);
 }
 
-boost::asio::awaitable<bool> RedisDatabase::connect_async(const std::string& connection_string, const std::string& password)
+boost::asio::awaitable<bool> RedisBase::connect_async(const std::string& connection_string, const std::string& password)
 {
     std::string host = "127.0.0.1";
     std::string port = "6379";
@@ -487,15 +436,16 @@ boost::asio::awaitable<bool> RedisDatabase::connect_async(const std::string& con
     co_return true;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::request_exists_async(const std::string& client_id, const std::string& request_id) const
+boost::asio::awaitable<bool> RedisBase::request_exists_async(const std::string& client_id, const std::string& request_id) const
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     std::vector<std::string> args{"EXISTS", key};
-    auto reply = co_await execute_integer_command_async(args);
-    co_return reply.has_value() && reply.value() > 0;
+    long long value = 0;
+    auto ok = co_await execute_integer_command_async(args, value);
+    co_return ok && value > 0;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::async_run(const std::vector<std::string>& args, RedisReply& reply)
+boost::asio::awaitable<bool> RedisBase::async_run(const std::vector<std::string>& args, RedisReply& reply)
 {
     try {
         reply = co_await impl_->execute_async(args);
@@ -510,10 +460,11 @@ boost::asio::awaitable<bool> RedisDatabase::async_run(const std::vector<std::str
     co_return false;
 }
 
-std::optional<RedisReply> RedisDatabase::execute_command(const std::vector<std::string>& args) const
+bool RedisBase::execute_command(const std::vector<std::string>& args, RedisReply& reply) const
 {
     try {
-        return impl_->execute(args);
+        reply = impl_->execute(args);
+        return true;
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
         logger->error("Redis execute_command parse error: {}", ex.what());
@@ -521,13 +472,14 @@ std::optional<RedisReply> RedisDatabase::execute_command(const std::vector<std::
         auto logger = get_logger();
         logger->error("Redis execute_command failed: {}", ex.what());
     }
-    return std::nullopt;
+    return false;
 }
 
-boost::asio::awaitable<std::optional<RedisReply>> RedisDatabase::execute_command_async(const std::vector<std::string>& args) const
+boost::asio::awaitable<bool> RedisBase::execute_command_async(const std::vector<std::string>& args, RedisReply& reply) const
 {
     try {
-        co_return co_await impl_->execute_async(args);
+        reply = co_await impl_->execute_async(args);
+        co_return true;
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
         logger->error("Redis execute_command_async parse error: {}", ex.what());
@@ -535,50 +487,55 @@ boost::asio::awaitable<std::optional<RedisReply>> RedisDatabase::execute_command
         auto logger = get_logger();
         logger->error("Redis execute_command_async failed: {}", ex.what());
     }
-    co_return std::nullopt;
+    co_return false;
 }
 
-std::optional<std::string> RedisDatabase::get(const std::string& key) const
+std::string RedisBase::get(const std::string& key) const
 {
-    return execute_bulk_string_command({"GET", key});
+    std::string value;
+    execute_bulk_string_command({"GET", key}, value);
+    return value;
 }
 
-bool RedisDatabase::set(const std::string& key, const std::string& value, int expire_seconds, bool only_if_not_exists) const
+bool RedisBase::set(const std::string& key, const std::string& value, int expire_seconds, bool only_if_not_exists) const
 {
     return execute_set_command(key, value, expire_seconds, only_if_not_exists);
 }
 
-std::optional<long long> RedisDatabase::incr(const std::string& key)
+long long RedisBase::incr(const std::string& key)
 {
-    return execute_integer_command({"INCR", key});
+    long long value = 0;
+    execute_integer_command({"INCR", key}, value);
+    return value;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::reserve_request_id_async(const std::string& client_id, const std::string& request_id)
+boost::asio::awaitable<bool> RedisBase::reserve_request_id_async(const std::string& client_id, const std::string& request_id)
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     co_return co_await execute_set_command_async(key, "VALIDATING", 900, true);
 }
 
-boost::asio::awaitable<bool> RedisDatabase::release_request_id_async(const std::string& client_id, const std::string& request_id)
+boost::asio::awaitable<bool> RedisBase::release_request_id_async(const std::string& client_id, const std::string& request_id)
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     std::vector<std::string> args{"DEL", key};
-    auto reply = co_await execute_integer_command_async(args);
-    co_return reply.has_value();
+    long long value = 0;
+    auto ok = co_await execute_integer_command_async(args, value);
+    co_return ok;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::can_accept_request_async(const std::string& client_id,
-                                                                     int max_active_workflows,
-                                                                     int max_requests,
-                                                                     int window_seconds,
-                                                                     std::string& rejection_reason) const
+boost::asio::awaitable<bool> RedisBase::can_accept_request_async(const std::string& client_id,
+                                                                 int max_active_workflows,
+                                                                 int max_requests,
+                                                                 int window_seconds,
+                                                                 std::string& rejection_reason) const
 {
     auto active_workflows_key = std::string("fp:active:") + client_id + ":workflows";
     std::vector<std::string> active_args{"SCARD", active_workflows_key};
-    auto active_count = co_await execute_integer_command_async(active_args);
     long long active_count_value = 0;
-    if (active_count.has_value()) {
-        active_count_value = active_count.value();
+    auto active_count_ok = co_await execute_integer_command_async(active_args, active_count_value);
+    if (!active_count_ok) {
+        active_count_value = 0;
     }
 
     if (active_count_value >= max_active_workflows) {
@@ -593,14 +550,17 @@ boost::asio::awaitable<bool> RedisDatabase::can_accept_request_async(const std::
         keys.push_back("fp:rate:" + client_id + ":" + std::to_string(epoch - i));
     }
 
-    auto counts = co_await execute_mget_command_async(keys);
+    std::vector<std::string> counts;
+    auto mget_ok = co_await execute_mget_command_async(keys, counts);
     long long total_requests = 0;
-    for (const auto& value : counts) {
-        if (value.has_value()) {
-            try {
-                total_requests += std::stoll(value.value());
-            } catch (...) {
-                // ignore parse errors for rate buckets
+    if (mget_ok) {
+        for (const auto& value : counts) {
+            if (!value.empty()) {
+                try {
+                    total_requests += std::stoll(value);
+                } catch (...) {
+                    // ignore parse errors for rate buckets
+                }
             }
         }
     }
@@ -613,13 +573,13 @@ boost::asio::awaitable<bool> RedisDatabase::can_accept_request_async(const std::
     co_return true;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::admit_request_async(const std::string& client_id,
-                                                                 const std::string& request_id,
-                                                                 const std::string& workflow_id,
-                                                                 int max_active_workflows,
-                                                                 int max_requests,
-                                                                 int window_seconds,
-                                                                 std::string& rejection_reason)
+boost::asio::awaitable<bool> RedisBase::admit_request_async(const std::string& client_id,
+                                                             const std::string& request_id,
+                                                             const std::string& workflow_id,
+                                                             int max_active_workflows,
+                                                             int max_requests,
+                                                             int window_seconds,
+                                                             std::string& rejection_reason)
 {
     std::string request_key = "fp:req:" + client_id + ":" + request_id;
     std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
@@ -653,7 +613,7 @@ boost::asio::awaitable<bool> RedisDatabase::admit_request_async(const std::strin
         local current_rate = redis.call('INCR', rate_key_server_time)
         if current_rate == 1 then
             -- expire slightly after the window to ensure correct accounting in case of redis clock skew
-            redis.call('EXPIRE', rate_key_server_time, ARGV[3] + 1)  
+            redis.call('EXPIRE', rate_key_server_time, ARGV[3] + 1)
         end
 
         -- Compute total across the window
@@ -697,15 +657,15 @@ boost::asio::awaitable<bool> RedisDatabase::admit_request_async(const std::strin
     script_args.push_back(workflow_id);
     script_args.push_back(client_id);
 
-    auto reply = co_await execute_lua_script_async(lua_script, keys, script_args);
-    if (!reply.has_value() || reply->size() < 2 || !(*reply)[0].has_value()) {
-        // Failded to execute the Lua script or parse the reply
+    std::vector<std::string> lua_values;
+    auto lua_ok = co_await execute_lua_script_async(lua_script, keys, script_args, lua_values);
+    if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
         rejection_reason = INTERNAL_DB_FAILURE;
         co_return false;
     }
 
-    std::string status = (*reply)[0].value();
-    std::string detail = (*reply)[1].value_or("unknown");
+    std::string status = lua_values[0];
+    std::string detail = lua_values[1];
     if (status == "1") {
         co_return true;
     }
@@ -717,8 +677,7 @@ boost::asio::awaitable<bool> RedisDatabase::admit_request_async(const std::strin
     } else if (detail == "active_limit") {
         rejection_reason = CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
     } else if (detail == "duplicate_workflow") {
-        if (detail == "duplicate_workflow") {
-            rejection_reason = WORKFLOW_ID_EXISTS;
+        rejection_reason = WORKFLOW_ID_EXISTS;
     } else {
         Logger::get_instance()->error("Unexpected Lua script failure: {}", detail);
         rejection_reason = INTERNAL_DB_FAILURE;
@@ -726,43 +685,47 @@ boost::asio::awaitable<bool> RedisDatabase::admit_request_async(const std::strin
     co_return false;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::update_request_status_async(const std::string& client_id,
-                                                                         const std::string& request_id,
-                                                                         const std::string& status)
+boost::asio::awaitable<bool> RedisBase::update_request_status_async(const std::string& client_id,
+                                                                     const std::string& request_id,
+                                                                     const std::string& status)
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     co_return co_await execute_set_command_async(key, status, 900, false);
 }
 
-boost::asio::awaitable<std::optional<std::string>> RedisDatabase::fetch_request_status_async(const std::string& client_id,
-                                                                                             const std::string& request_id) const
+boost::asio::awaitable<bool> RedisBase::fetch_request_status_async(const std::string& client_id,
+                                                                   const std::string& request_id,
+                                                                   std::string& value) const
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     std::vector<std::string> args{"GET", key};
-    co_return co_await execute_bulk_string_command_async(args);
+    co_return co_await execute_bulk_string_command_async(args, value);
 }
 
-boost::asio::awaitable<bool> RedisDatabase::remove_active_workflow_async(const std::string& client_id,
-                                                                         const std::string& workflow_id)
+boost::asio::awaitable<bool> RedisBase::remove_active_workflow_async(const std::string& client_id,
+                                                                     const std::string& workflow_id)
 {
     std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
     std::vector<std::string> args{"SREM", active_workflows_key, workflow_id};
-    auto reply = co_await execute_integer_command_async(args);
-    co_return reply.has_value() && reply.value() > 0;
+    long long value = 0;
+    auto ok = co_await execute_integer_command_async(args, value);
+    co_return ok && value > 0;
 }
 
-boost::asio::awaitable<std::optional<long long>> RedisDatabase::execute_integer_command_async(const std::vector<std::string>& args) const
+boost::asio::awaitable<bool> RedisBase::execute_integer_command_async(const std::vector<std::string>& args, long long& value) const
 {
     try {
         auto reply = co_await impl_->execute_async(args);
         if (reply.type == RedisReply::Type::Integer) {
-            co_return reply.integer_value;
+            value = reply.integer_value;
+            co_return true;
         }
         if (reply.type == RedisReply::Type::SimpleString) {
             try {
-                co_return std::stoll(reply.string_value);
+                value = std::stoll(reply.string_value);
+                co_return true;
             } catch (...) {
-                co_return std::nullopt;
+                co_return false;
             }
         }
     } catch (const RedisParseException& ex) {
@@ -772,17 +735,18 @@ boost::asio::awaitable<std::optional<long long>> RedisDatabase::execute_integer_
         auto logger = get_logger();
         logger->error("Redis integer command failed: {}", ex.what());
     }
-    co_return std::nullopt;
+    co_return false;
 }
 
-boost::asio::awaitable<std::optional<std::string>> RedisDatabase::execute_bulk_string_command_async(const std::vector<std::string>& args) const
+boost::asio::awaitable<bool> RedisBase::execute_bulk_string_command_async(const std::vector<std::string>& args, std::string& value) const
 {
     try {
         auto reply = co_await impl_->execute_async(args);
         if (reply.type == RedisReply::Type::BulkString || reply.type == RedisReply::Type::SimpleString) {
-            co_return reply.string_value;
+            value = reply.string_value;
+            co_return true;
         }
-        co_return std::nullopt;
+        co_return false;
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
         logger->error("Redis command parse error: {}", ex.what());
@@ -790,17 +754,18 @@ boost::asio::awaitable<std::optional<std::string>> RedisDatabase::execute_bulk_s
         auto logger = get_logger();
         logger->error("Redis bulk string command failed: {}", ex.what());
     }
-    co_return std::nullopt;
+    co_return false;
 }
 
-boost::asio::awaitable<std::vector<std::optional<std::string>>> RedisDatabase::execute_mget_command_async(const std::vector<std::string>& keys) const
+boost::asio::awaitable<bool> RedisBase::execute_mget_command_async(const std::vector<std::string>& keys, std::vector<std::string>& values) const
 {
     try {
         auto args = std::vector<std::string>{"MGET"};
         args.insert(args.end(), keys.begin(), keys.end());
         auto reply = co_await impl_->execute_async(args);
         if (reply.type == RedisReply::Type::Array) {
-            co_return reply.array_value;
+            values = reply.array_value;
+            co_return true;
         }
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
@@ -809,13 +774,14 @@ boost::asio::awaitable<std::vector<std::optional<std::string>>> RedisDatabase::e
         auto logger = get_logger();
         logger->error("Redis MGET command failed: {}", ex.what());
     }
-    co_return std::vector<std::optional<std::string>>{};
+    values.clear();
+    co_return false;
 }
 
-boost::asio::awaitable<std::optional<std::vector<std::optional<std::string>>>> RedisDatabase::execute_lua_script_async(
-    const std::string& script,
-    const std::vector<std::string>& keys,
-    const std::vector<std::string>& args) const
+boost::asio::awaitable<bool> RedisBase::execute_lua_script_async(const std::string& script,
+                                                                 const std::vector<std::string>& keys,
+                                                                 const std::vector<std::string>& args,
+                                                                 std::vector<std::string>& values) const
 {
     try {
         std::vector<std::string> redis_args;
@@ -828,7 +794,8 @@ boost::asio::awaitable<std::optional<std::vector<std::optional<std::string>>>> R
 
         auto reply = co_await impl_->execute_async(redis_args);
         if (reply.type == RedisReply::Type::Array) {
-            co_return reply.array_value;
+            values = reply.array_value;
+            co_return true;
         }
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
@@ -837,13 +804,14 @@ boost::asio::awaitable<std::optional<std::vector<std::optional<std::string>>>> R
         auto logger = get_logger();
         logger->error("Redis Lua script failed: {}", ex.what());
     }
-    co_return std::nullopt;
+    values.clear();
+    co_return false;
 }
 
-boost::asio::awaitable<bool> RedisDatabase::execute_set_command_async(const std::string& key,
-                                                                     const std::string& value,
-                                                                     int expire_seconds,
-                                                                     bool only_if_not_exists) const
+boost::asio::awaitable<bool> RedisBase::execute_set_command_async(const std::string& key,
+                                                                   const std::string& value,
+                                                                   int expire_seconds,
+                                                                   bool only_if_not_exists) const
 {
     try {
         std::vector<std::string> args = {"SET", key, value};
@@ -870,38 +838,39 @@ boost::asio::awaitable<bool> RedisDatabase::execute_set_command_async(const std:
     co_return false;
 }
 
-bool RedisDatabase::request_exists(const std::string& client_id, const std::string& request_id) const
+bool RedisBase::request_exists(const std::string& client_id, const std::string& request_id) const
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
-    auto reply = execute_integer_command({"EXISTS", key});
-    return reply.has_value() && reply.value() > 0;
+    long long value = 0;
+    auto ok = execute_integer_command({"EXISTS", key}, value);
+    return ok && value > 0;
 }
 
-bool RedisDatabase::reserve_request_id(const std::string& client_id, const std::string& request_id)
+bool RedisBase::reserve_request_id(const std::string& client_id, const std::string& request_id)
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     return execute_set_command(key, "VALIDATING", 900, true);
 }
 
-bool RedisDatabase::release_request_id(const std::string& client_id, const std::string& request_id)
+bool RedisBase::release_request_id(const std::string& client_id, const std::string& request_id)
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
-    auto reply = execute_integer_command({"DEL", key});
-    return reply.has_value();
+    long long value = 0;
+    auto ok = execute_integer_command({"DEL", key}, value);
+    return ok;
 }
 
-bool RedisDatabase::can_accept_request(const std::string& client_id,
-                                       int max_active_workflows,
-                                       int max_requests,
-                                       int window_seconds,
-                                       std::string& rejection_reason) const
+bool RedisBase::can_accept_request(const std::string& client_id,
+                                   int max_active_workflows,
+                                   int max_requests,
+                                   int window_seconds,
+                                   std::string& rejection_reason) const
 {
-    // Check active workflow set size
     auto active_workflows_key = std::string("fp:active:") + client_id + ":workflows";
-    auto active_count = execute_integer_command({"SCARD", active_workflows_key});
     long long active_count_value = 0;
-    if (active_count.has_value()) {
-        active_count_value = active_count.value();
+    auto active_count_ok = execute_integer_command({"SCARD", active_workflows_key}, active_count_value);
+    if (!active_count_ok) {
+        active_count_value = 0;
     }
 
     if (active_count_value >= max_active_workflows) {
@@ -916,14 +885,17 @@ bool RedisDatabase::can_accept_request(const std::string& client_id,
         keys.push_back("fp:rate:" + client_id + ":" + std::to_string(epoch - i));
     }
 
-    auto counts = execute_mget_command(keys);
+    std::vector<std::string> counts;
+    auto mget_ok = execute_mget_command(keys, counts);
     long long total_requests = 0;
-    for (const auto& value : counts) {
-        if (value.has_value()) {
-            try {
-                total_requests += std::stoll(value.value());
-            } catch (...) {
-                // ignore parse errors for rate buckets
+    if (mget_ok) {
+        for (const auto& value : counts) {
+            if (!value.empty()) {
+                try {
+                    total_requests += std::stoll(value);
+                } catch (...) {
+                    // ignore parse errors for rate buckets
+                }
             }
         }
     }
@@ -936,13 +908,13 @@ bool RedisDatabase::can_accept_request(const std::string& client_id,
     return true;
 }
 
-bool RedisDatabase::admit_request(const std::string& client_id,
-                                  const std::string& request_id,
-                                  const std::string& workflow_id,
-                                  int max_active_workflows,
-                                  int max_requests,
-                                  int window_seconds,
-                                  std::string& rejection_reason)
+bool RedisBase::admit_request(const std::string& client_id,
+                              const std::string& request_id,
+                              const std::string& workflow_id,
+                              int max_active_workflows,
+                              int max_requests,
+                              int window_seconds,
+                              std::string& rejection_reason)
 {
     std::string request_key = "fp:req:" + client_id + ":" + request_id;
     std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
@@ -976,7 +948,7 @@ bool RedisDatabase::admit_request(const std::string& client_id,
         local current_rate = redis.call('INCR', rate_key_server_time)
         if current_rate == 1 then
             -- expire slightly after the window to ensure correct accounting in case of redis clock skew
-            redis.call('EXPIRE', rate_key_server_time, ARGV[3] + 1)  
+            redis.call('EXPIRE', rate_key_server_time, ARGV[3] + 1)
         end
 
         -- Compute total across the window
@@ -1014,20 +986,21 @@ bool RedisDatabase::admit_request(const std::string& client_id,
     )lua";
 
     std::vector<std::string> script_args;
-    script_args.push_back(std::to_string(max_active_workflows));  // ARGV[1]
-    script_args.push_back(std::to_string(max_requests));          // ARGV[2]
-    script_args.push_back(std::to_string(window_seconds));        // ARGV[3]
-    script_args.push_back(workflow_id);                           // ARGV[4] - workflow identifier in active set
-    script_args.push_back(client_id);                             // ARGV[5] - for rate key construction
+    script_args.push_back(std::to_string(max_active_workflows));
+    script_args.push_back(std::to_string(max_requests));
+    script_args.push_back(std::to_string(window_seconds));
+    script_args.push_back(workflow_id);
+    script_args.push_back(client_id);
 
-    auto reply = execute_lua_script(lua_script, keys, script_args);
-    if (!reply.has_value() || reply->size() < 2 || !(*reply)[0].has_value()) {
+    std::vector<std::string> lua_values;
+    auto lua_ok = execute_lua_script(lua_script, keys, script_args, lua_values);
+    if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
         rejection_reason = "Unable to perform atomic Redis admission check.";
         return false;
     }
 
-    std::string status = (*reply)[0].value();
-    std::string detail = (*reply)[1].value_or("unknown");
+    std::string status = lua_values[0];
+    std::string detail = lua_values[1];
     if (status == "1") {
         return true;
     }
@@ -1044,33 +1017,36 @@ bool RedisDatabase::admit_request(const std::string& client_id,
     return false;
 }
 
-bool RedisDatabase::update_request_status(const std::string& client_id,
-                                          const std::string& request_id,
-                                          const std::string& status)
+bool RedisBase::update_request_status(const std::string& client_id,
+                                      const std::string& request_id,
+                                      const std::string& status)
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
     return execute_set_command(key, status, 900, false);
 }
 
-std::optional<std::string> RedisDatabase::fetch_request_status(const std::string& client_id,
-                                                               const std::string& request_id) const
+bool RedisBase::fetch_request_status(const std::string& client_id,
+                                     const std::string& request_id,
+                                     std::string& value) const
 {
     std::string key = "fp:req:" + client_id + ":" + request_id;
-    return execute_bulk_string_command({"GET", key});
+    return execute_bulk_string_command({"GET", key}, value);
 }
 
-std::optional<long long> RedisDatabase::execute_integer_command(const std::vector<std::string>& args) const
+bool RedisBase::execute_integer_command(const std::vector<std::string>& args, long long& value) const
 {
     try {
         auto reply = impl_->execute(args);
         if (reply.type == RedisReply::Type::Integer) {
-            return reply.integer_value;
+            value = reply.integer_value;
+            return true;
         }
         if (reply.type == RedisReply::Type::SimpleString) {
             try {
-                return std::stoll(reply.string_value);
+                value = std::stoll(reply.string_value);
+                return true;
             } catch (...) {
-                return std::nullopt;
+                return false;
             }
         }
     } catch (const RedisParseException& ex) {
@@ -1080,17 +1056,18 @@ std::optional<long long> RedisDatabase::execute_integer_command(const std::vecto
         auto logger = get_logger();
         logger->error("Redis integer command failed: {}", ex.what());
     }
-    return std::nullopt;
+    return false;
 }
 
-std::optional<std::string> RedisDatabase::execute_bulk_string_command(const std::vector<std::string>& args) const
+bool RedisBase::execute_bulk_string_command(const std::vector<std::string>& args, std::string& value) const
 {
     try {
         auto reply = impl_->execute(args);
         if (reply.type == RedisReply::Type::BulkString || reply.type == RedisReply::Type::SimpleString) {
-            return reply.string_value;
+            value = reply.string_value;
+            return true;
         }
-        return std::nullopt;
+        return false;
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
         logger->error("Redis command parse error: {}", ex.what());
@@ -1098,10 +1075,10 @@ std::optional<std::string> RedisDatabase::execute_bulk_string_command(const std:
         auto logger = get_logger();
         logger->error("Redis bulk string command failed: {}", ex.what());
     }
-    return std::nullopt;
+    return false;
 }
 
-std::vector<std::optional<std::string>> RedisDatabase::execute_mget_command(const std::vector<std::string>& keys) const
+bool RedisBase::execute_mget_command(const std::vector<std::string>& keys, std::vector<std::string>& values) const
 {
     try {
         auto args = std::vector<std::string>{"MGET"};
@@ -1109,7 +1086,8 @@ std::vector<std::optional<std::string>> RedisDatabase::execute_mget_command(cons
         auto reply = impl_->execute(args);
 
         if (reply.type == RedisReply::Type::Array) {
-            return reply.array_value;
+            values = reply.array_value;
+            return true;
         }
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
@@ -1118,13 +1096,14 @@ std::vector<std::optional<std::string>> RedisDatabase::execute_mget_command(cons
         auto logger = get_logger();
         logger->error("Redis MGET command failed: {}", ex.what());
     }
-    return {};
+    values.clear();
+    return false;
 }
 
-std::optional<std::vector<std::optional<std::string>>> RedisDatabase::execute_lua_script(
-    const std::string& script,
-    const std::vector<std::string>& keys,
-    const std::vector<std::string>& args) const
+bool RedisBase::execute_lua_script(const std::string& script,
+                                   const std::vector<std::string>& keys,
+                                   const std::vector<std::string>& args,
+                                   std::vector<std::string>& values) const
 {
     try {
         std::vector<std::string> redis_args;
@@ -1137,7 +1116,8 @@ std::optional<std::vector<std::optional<std::string>>> RedisDatabase::execute_lu
 
         auto reply = impl_->execute(redis_args);
         if (reply.type == RedisReply::Type::Array) {
-            return reply.array_value;
+            values = reply.array_value;
+            return true;
         }
     } catch (const RedisParseException& ex) {
         auto logger = get_logger();
@@ -1146,13 +1126,14 @@ std::optional<std::vector<std::optional<std::string>>> RedisDatabase::execute_lu
         auto logger = get_logger();
         logger->error("Redis Lua script failed: {}", ex.what());
     }
-    return std::nullopt;
+    values.clear();
+    return false;
 }
 
-bool RedisDatabase::execute_set_command(const std::string& key,
-                                        const std::string& value,
-                                        int expire_seconds,
-                                        bool only_if_not_exists) const
+bool RedisBase::execute_set_command(const std::string& key,
+                                    const std::string& value,
+                                    int expire_seconds,
+                                    bool only_if_not_exists) const
 {
     try {
         std::vector<std::string> args = {"SET", key, value};
@@ -1179,11 +1160,288 @@ bool RedisDatabase::execute_set_command(const std::string& key,
     return false;
 }
 
-bool RedisDatabase::remove_active_workflow(const std::string& client_id, const std::string& workflow_id)
+bool RedisBase::remove_active_workflow(const std::string& client_id, const std::string& workflow_id)
 {
     std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
-    auto reply = execute_integer_command({"SREM", active_workflows_key, workflow_id});
-    return reply.has_value() && reply.value() > 0;
+    long long value = 0;
+    auto ok = execute_integer_command({"SREM", active_workflows_key, workflow_id}, value);
+    return ok && value > 0;
+}
+
+std::shared_ptr<RedisDatabase> RedisDatabase::instance_ = nullptr;
+std::once_flag RedisDatabase::init_flag_;
+
+RedisDatabase::RedisDatabase(boost::asio::io_context& ioc)
+    : RedisBase(ioc)
+{}
+
+RedisDatabase::~RedisDatabase() = default;
+
+std::shared_ptr<RedisDatabase> RedisDatabase::init(boost::asio::io_context& ioc, const InMemoryDBConfig& config)
+{
+    std::call_once(init_flag_, [&]() {
+        auto instance = std::shared_ptr<RedisDatabase>(new RedisDatabase(ioc));
+        std::string connection_string = config.host + ":" + std::to_string(config.port);
+        if (!instance->connect(connection_string, config.password)) {
+            throw std::runtime_error("Unable to connect to Redis at " + connection_string);
+        }
+        instance_ = std::move(instance);
+    });
+
+    if (!instance_) {
+        throw std::runtime_error("RedisDatabase initialization failed");
+    }
+    return instance_;
+}
+
+std::shared_ptr<RedisDatabase> RedisDatabase::init(boost::asio::io_context& ioc)
+{
+    return init(ioc, Config::get_config().redis());
+}
+
+std::shared_ptr<RedisDatabase> RedisDatabase::get_instance()
+{
+    if (!instance_) {
+        throw std::runtime_error("RedisDatabase has not been initialized");
+    }
+    return instance_;
+}
+
+bool RedisDatabase::connect(const std::string& connection_string, const std::string& password)
+{
+    return RedisBase::connect(connection_string, password);
+}
+
+bool RedisDatabase::reconnect()
+{
+    return RedisBase::reconnect();
+}
+
+bool RedisDatabase::request_exists(const std::string& client_id, const std::string& request_id) const
+{
+    return RedisBase::request_exists(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::connect_async(const std::string& connection_string, const std::string& password)
+{
+    co_return co_await RedisBase::connect_async(connection_string, password);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::request_exists_async(const std::string& client_id, const std::string& request_id) const
+{
+    co_return co_await RedisBase::request_exists_async(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::reserve_request_id_async(const std::string& client_id, const std::string& request_id)
+{
+    co_return co_await RedisBase::reserve_request_id_async(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::release_request_id_async(const std::string& client_id, const std::string& request_id)
+{
+    co_return co_await RedisBase::release_request_id_async(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::can_accept_request_async(const std::string& client_id,
+                                                                     int max_active_workflows,
+                                                                     int max_requests,
+                                                                     int window_seconds,
+                                                                     std::string& rejection_reason) const
+{
+    co_return co_await RedisBase::can_accept_request_async(client_id, max_active_workflows, max_requests, window_seconds, rejection_reason);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::admit_request_async(const std::string& client_id,
+                                                                 const std::string& request_id,
+                                                                 const std::string& workflow_id,
+                                                                 int max_active_workflows,
+                                                                 int max_requests,
+                                                                 int window_seconds,
+                                                                 std::string& rejection_reason)
+{
+    co_return co_await RedisBase::admit_request_async(client_id, request_id, workflow_id, max_active_workflows, max_requests, window_seconds, rejection_reason);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::update_request_status_async(const std::string& client_id,
+                                                                         const std::string& request_id,
+                                                                         const std::string& status)
+{
+    co_return co_await RedisBase::update_request_status_async(client_id, request_id, status);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::fetch_request_status_async(const std::string& client_id,
+                                                                       const std::string& request_id,
+                                                                       std::string& value) const
+{
+    co_return co_await RedisBase::fetch_request_status_async(client_id, request_id, value);
+}
+
+boost::asio::awaitable<bool> RedisDatabase::remove_active_workflow_async(const std::string& client_id,
+                                                                         const std::string& workflow_id)
+{
+    co_return co_await RedisBase::remove_active_workflow_async(client_id, workflow_id);
+}
+
+bool RedisDatabase::reserve_request_id(const std::string& client_id, const std::string& request_id)
+{
+    return RedisBase::reserve_request_id(client_id, request_id);
+}
+
+bool RedisDatabase::release_request_id(const std::string& client_id, const std::string& request_id)
+{
+    return RedisBase::release_request_id(client_id, request_id);
+}
+
+bool RedisDatabase::can_accept_request(const std::string& client_id,
+                                       int max_active_workflows,
+                                       int max_requests,
+                                       int window_seconds,
+                                       std::string& rejection_reason) const
+{
+    return RedisBase::can_accept_request(client_id, max_active_workflows, max_requests, window_seconds, rejection_reason);
+}
+
+bool RedisDatabase::admit_request(const std::string& client_id,
+                                  const std::string& request_id,
+                                  const std::string& workflow_id,
+                                  int max_active_workflows,
+                                  int max_requests,
+                                  int window_seconds,
+                                  std::string& rejection_reason)
+{
+    return RedisBase::admit_request(client_id, request_id, workflow_id, max_active_workflows, max_requests, window_seconds, rejection_reason);
+}
+
+bool RedisDatabase::update_request_status(const std::string& client_id,
+                                          const std::string& request_id,
+                                          const std::string& status)
+{
+    return RedisBase::update_request_status(client_id, request_id, status);
+}
+
+bool RedisDatabase::fetch_request_status(const std::string& client_id,
+                                         const std::string& request_id,
+                                         std::string& value) const
+{
+    return RedisBase::fetch_request_status(client_id, request_id, value);
+}
+
+bool RedisDatabase::remove_active_workflow(const std::string& client_id, const std::string& workflow_id)
+{
+    return RedisBase::remove_active_workflow(client_id, workflow_id);
+}
+
+std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::instance_ = nullptr;
+std::once_flag RedisDatabaseAsync::init_flag_;
+
+RedisDatabaseAsync::RedisDatabaseAsync(boost::asio::io_context& ioc)
+    : RedisBase(ioc)
+{}
+
+RedisDatabaseAsync::~RedisDatabaseAsync() = default;
+
+std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::init(boost::asio::io_context& ioc, const InMemoryDBConfig& config)
+{
+    std::call_once(init_flag_, [&]() {
+        auto instance = std::shared_ptr<RedisDatabaseAsync>(new RedisDatabaseAsync(ioc));
+        std::string connection_string = config.host + ":" + std::to_string(config.port);
+        if (!instance->connect(connection_string, config.password)) {
+            throw std::runtime_error("Unable to connect to Redis at " + connection_string);
+        }
+        instance_ = std::move(instance);
+    });
+    if (!instance_) {
+        throw std::runtime_error("RedisDatabaseAsync initialization failed");
+    }
+    return instance_;
+}
+
+std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::init(boost::asio::io_context& ioc)
+{
+    return init(ioc, Config::get_config().redis());
+}
+
+std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::get_instance()
+{
+    if (!instance_) {
+        throw std::runtime_error("RedisDatabaseAsync has not been initialized");
+    }
+    return instance_;
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::connect_async(const std::string& connection_string, const std::string& password)
+{
+    co_return co_await RedisBase::connect_async(connection_string, password);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::request_exists_async(const std::string& client_id, const std::string& request_id) const
+{
+    co_return co_await RedisBase::request_exists_async(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::reserve_request_id_async(const std::string& client_id, const std::string& request_id)
+{
+    co_return co_await RedisBase::reserve_request_id_async(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::release_request_id_async(const std::string& client_id, const std::string& request_id)
+{
+    co_return co_await RedisBase::release_request_id_async(client_id, request_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::can_accept_request_async(const std::string& client_id,
+                                                                         int max_active_workflows,
+                                                                         int max_requests,
+                                                                         int window_seconds,
+                                                                         std::string& rejection_reason) const
+{
+    co_return co_await RedisBase::can_accept_request_async(client_id, max_active_workflows, max_requests, window_seconds, rejection_reason);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::string& client_id,
+                                                                     const std::string& request_id,
+                                                                     const std::string& workflow_id,
+                                                                     int max_active_workflows,
+                                                                     int max_requests,
+                                                                     int window_seconds,
+                                                                     std::string& rejection_reason)
+{
+    co_return co_await RedisBase::admit_request_async(client_id, request_id, workflow_id, max_active_workflows, max_requests, window_seconds, rejection_reason);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::update_request_status_async(const std::string& client_id,
+                                                                             const std::string& request_id,
+                                                                             const std::string& status)
+{
+    co_return co_await RedisBase::update_request_status_async(client_id, request_id, status);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_request_status_async(const std::string& client_id,
+                                                                           const std::string& request_id,
+                                                                           std::string& value) const
+{
+    co_return co_await RedisBase::fetch_request_status_async(client_id, request_id, value);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::remove_active_workflow_async(const std::string& client_id,
+                                                                             const std::string& workflow_id)
+{
+    co_return co_await RedisBase::remove_active_workflow_async(client_id, workflow_id);
+}
+
+void init_redis_database(boost::asio::io_context& ioc, const InMemoryDBConfig& config)
+{
+    RedisDatabase::init(ioc, config);
+}
+
+std::shared_ptr<IRedisDatabase> get_redis_database()
+{
+    return RedisDatabase::get_instance();
+}
+
+std::shared_ptr<IRedisDatabaseAsync> get_redis_database_async()
+{
+    return RedisDatabaseAsync::get_instance();
 }
 
 } // namespace flow_pilot
