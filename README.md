@@ -2,7 +2,7 @@
 
 A distributed workflow orchestration platform designed for reliable asynchronous task execution, dependency-aware scheduling, and extensible worker integration.
 
-FlowPilot is a modern backend infrastructure project focused on orchestration, concurrency, reliability, and distributed systems design using modern C++ and asynchronous IO. real-world distributed systems concepts including:
+FlowPilot is a modern backend infrastructure project focused on workflow orchestration, asynchronous I/O, concurrency, and reliability. It explores real-world distributed systems concepts using modern C++20 and Boost.Asio coroutines.
 
 ---
 
@@ -18,9 +18,8 @@ FlowPilot was created as a hands-on engineering project to explore and implement
 * Rate limiting
 * Redis coordination
 * Durable persistence
-* Extensible execution models
+* Extensible execution models - planned
 * Observability and structured logging
-* Cloud-oriented microservice architecture
 
 The project emphasizes clean architecture, operational semantics, and realistic infrastructure design rather than CRUD-oriented backend development.
 
@@ -89,7 +88,7 @@ This enables:
                            v
                 +----------------------+
                 |  Workflow Service    |
-                | Admission & DAG      |
+                | Admission &          |
                 | Validation Layer     |
                 +----------+-----------+
                            |
@@ -98,7 +97,7 @@ This enables:
         v                                     v
 +-------------------+             +-------------------+
 | Redis             |             | SQLite            |
-| Coordination Layer|             | Durable Storage   |
+| Admission Layer   |             | Durable Storage   |
 +-------------------+             +-------------------+
                            |
                            v
@@ -114,17 +113,38 @@ This enables:
 
 ---
 
+# Design Principles
+
+• Keep the HTTP layer free of business logic.
+• Separate admission control from workflow execution.
+• Redis provides fast coordination; SQLite provides durable persistence.
+• Validate workflows before they enter the execution engine.
+• Prefer explicit workflow state over implicit behavior.
+• Build around asynchronous I/O and coroutine-based composition.
+
+
 # Key Design Decisions
+
+FlowPilot is being developed in phases. 
+The current implementation focuses on building a robust admission layer that guarantees only valid workflows are registered for execution. 
+Subsequent phases build the execution engine and distributed orchestration capabilities on top of this foundation.
 
 ## Atomic Workflow Admission
 
-Workflow requests undergo multiple validation stages before execution begins:
+Workflow requests pass through a multi-stage admission pipeline. Fast, transient admission decisions (duplicate detection, rate limiting, concurrent workflow limits) are handled by Redis. Once admitted, requests are durably recorded in a database (SQLite) before workflow validation continues. The database is the authoritative audit trail and system of record, while Redis remains a transient coordination layer. The admission validation steps are:
 
 - JSON parsing
 - JSON schema validation
-- semantic workflow validation
-- dependency validation
-- DAG cycle detection
+- Client Lookup
+- Rate limiting and duplication detection (Redis)
+- Persist request
+- policy validation
+- Semantic workflow validation
+- Workflow dependency validation
+- Workflow DAG cycle detection
+- Persist workflow
+- Register workflow for execution
+- HTTP response
 
 Execution begins only after the workflow is successfully persisted.
 
@@ -142,6 +162,16 @@ The API gateway never blocks waiting for workflow completion.
 
 Rollback semantics are implemented using explicit compensation jobs rather than distributed transactions.
 
+## Client Configuration
+
+Each registered client is associated with:
+
+• admission policy
+• rate-limit policy
+• workflow policy
+
+These policies are loaded during initialization and applied during workflow admission.
+
 ---
 
 # Technology Stack
@@ -149,16 +179,16 @@ Rollback semantics are implemented using explicit compensation jobs rather than 
 ## Core
 
 - Modern C++20
-- Boost.Asio
+- Boost.Asio (coroutines)
 - Boost.Beast
 - nlohmann/json
-- nlohmann/json-schema
+- JSON Schema validation (nlohmann/json-schema)
 - Redis
 - SQLite
-- Docker
 
 ## Planned Extensions
 
+* Docker
 * Kubernetes deployment
 * Prometheus metrics
 * Grafana dashboards
@@ -188,21 +218,33 @@ Rollback semantics are implemented using explicit compensation jobs rather than 
 
 ---
 
-## Current Status
+## Implementation Status
 
-FlowPilot is actively developed with core components implemented and unit-tested. Recent work focuses on asynchronous IO, coroutine-friendly database APIs, and improving test isolation.
+The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, and DAG dependency validation. Current development is focused on the workflow execution engine, including job scheduling, worker dispatch, and execution lifecycle management.
 
-Completed / in-progress items:
+### Phase 1 — Workflow Admission ✅
 
-- [x] Workflow schema design
-- [x] Async-friendly SQLite wrapper (`AsyncSQLiteDatabase`) — provides awaitable APIs and offloads blocking SQLite calls to a thread pool
-- [x] Redis client refactor (`RedisDatabase`) — supports awaitable APIs and test-local construction to avoid global io_context lifetime issues
-- [x] SQLite persistence core (`SQLiteDatabase`) with improved transactional handling
-- [x] Unit tests for async DB APIs and workflow validation (see `tests/`) — async DB tests pass in current CI runs
-- [x] Build refactor: project sources are packaged into `flow_pilot_lib` for faster incremental builds and reuse in tests
-- [ ] Full integration tests with external Redis instance (recommendation: run a local Redis for integration tests)
-- [ ] API gateway production hardening
-- [ ] Worker execution engine and scheduler clustering
+- HTTP API
+- Admission pipeline
+- Redis coordination
+- SQLite persistence
+- Workflow validation
+- DAG validation
+- Unit testing
+
+### Phase 2 — Workflow Execution (In Progress)
+
+- Job initialization
+- Scheduler
+- Worker dispatch
+- Execution monitoring
+
+### Phase 3 — Distributed Orchestration (Planned)
+
+- Multi-node scheduler
+- Recovery
+- Horizontal scaling
+- Observability
 
 ---
 

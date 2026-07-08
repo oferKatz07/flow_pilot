@@ -43,118 +43,147 @@ WorkflowService::WorkflowService(const std::string& schema_path)
  awaitable<ValidationResult> WorkflowService::submit_workflow(const std::string& body)
 {
     json workflow_data;
-    try {
-        workflow_data = json::parse(body);
-    }
-    catch (const nlohmann::json::parse_error& e) {
-        co_return ValidationResult{
-            false,
-            error_msg::INVALID_JSON_FORMAT,
-            {std::string("Parse error: ") + e.what()}
-        };
-    }
-
-    try {
-        validator_.validate(workflow_data);
-    }
-    catch (const std::exception& e) {
-        co_return ValidationResult{
-            false,
-            error_msg::SCHEMA_VALIDATION_FAILED,
-            {std::string("Schema error: ") + e.what()}
-        };
-    }
-
     RequestData workflow_request_info;
-    workflow_request_info.client_id = workflow_data.value("client_id", std::string());
-    workflow_request_info.request_id = workflow_data.value("request_id", std::string());
-    workflow_request_info.workflow_id = workflow_data.value("workflow_id", std::string());
-    workflow_request_info.workflow_payload_size_bytes = static_cast<int>(body.size());
-    workflow_request_info.operation = "CREATE";
-    to_string(RequestStatus::RECEIVED, workflow_request_info.status);
-
-    // Get client config from DB for policy and rate limit validation
-    // If client is not found, the assumption is that the client is not registered and the request is rejected
-    ClientConfig client_config;
-    if (!get_client_config(workflow_request_info.client_id, client_config)) {
-        co_return ValidationResult{
-            false,
-            error_msg::CLIENT_NOT_FOUND,
-            std::string(error_msg::CLIENT_NOT_FOUND)
-        };
-    }
-
     ValidationResult result = {
         true,
         error_msg::WORKFLOW_ADMITTED,  // "Workflow was validated and admitted"
         std::string(error_msg::WORKFLOW_ADMITTED)  // No errors
     };
 
-    std::string rejection_reason;
-    auto redis_db = RedisDatabaseAsync::get_instance();
-    bool res = co_await redis_db->admit_request_async(workflow_request_info.client_id,
-                                                      workflow_request_info.request_id,
-                                                      workflow_request_info.workflow_id,  
-                                                      client_config.rate_limit_config.max_concurrent_workflows,  
-                                                      client_config.rate_limit_config.max_requests,  
-                                                      client_config.rate_limit_config.window_sec,  
-                                                      rejection_reason);  
-    if (!res) {
-        co_await handle_request_rejection(result, workflow_request_info, rejection_reason, false);
+    if (!parse_request(body, workflow_data, workflow_request_info, result)) {
         co_return result;
+    }
+
+    // Get client config from DB for policy and rate limit validation
+    // If client is not found, the assumption is that the client is not registered and the request is rejected
+    ClientConfig client_config;
+    if (!get_client_config_data(workflow_request_info.client_id, client_config, result)) {
+        co_return result;
+    }
+
+    std::string rejection_reason;
+    // Check if the client can accept the request based on rate limits and active workflows
+    bool res = co_await admit_request(workflow_request_info, client_config.rate_limit_config, rejection_reason);
+    if (!res) {
+        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason, false);
     }
 
     // Persist the request in the DB for auditing purposes
-    res = co_await DBFactory::get_database().add_request_async(workflow_request_info, body, 
-                                                               client_config, rejection_reason);
+    res = co_await persist_request(workflow_request_info, body, client_config, rejection_reason);
     if (!res) {
-        co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
-
-        co_return result;
+        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
     }
 
-    // Validate received workflow against client's policy plan
-    res = validate_admission_client_workflow_policy(workflow_data, client_config.policy_config, 
-                                                    rejection_reason);
-    if (!res) {
-        co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
-
-        co_return result;
-    }
-
+    // Validate received workflow against client's policy plan and semantic correctness
     std::unordered_map<std::string, DagData> jobs_map;
-    res = validate_semantic(workflow_data, jobs_map, rejection_reason);
+    WorkflowfullData workflow_info;
+    res = validate_workflow(workflow_data, client_config.policy_config, jobs_map, workflow_info, rejection_reason);
     if (!res) {
-        co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
+        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
+    }
+    workflow_info.info = std::move(workflow_request_info);
 
-        co_return result;
+    res = co_await persist_workflow(workflow_info, rejection_reason);
+    if (!res) {
+        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
     }
 
-    res = validate_dependencies(workflow_data, jobs_map, rejection_reason);
-    if (!res) {
-        co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
+    co_return co_await handle_request_accepted(result, workflow_request_info);
+}
 
-        co_return result;
+bool WorkflowService::parse_request(const std::string& body, json& workflow_data, 
+                                    RequestData& request_info, ValidationResult& result) {
+    try {
+        workflow_data = json::parse(body);
+    }
+    catch (const nlohmann::json::parse_error& e) {
+        result.valid = false;
+        result.status_str = error_msg::INVALID_JSON_FORMAT;
+        result.errors_msg = std::string("JSON parse error: ") + e.what();
+
+        return false;
     }
 
-    // Add the workflow request record to the DB for durability and auditing
-    WorkflowfullData workflow_full_data;
-    workflow_full_data.info = std::move(workflow_request_info);
-    workflow_full_data.workflow_type = workflow_data.value("workflow_type", std::string());
-    workflow_full_data.total_jobs = static_cast<int>(workflow_data["jobs"].size());
-    workflow_full_data.workflow_version = Config::get_config().workflow().version;
-    to_string(WorkflowStatus::ADMITTED, workflow_full_data.status);
+    try {
+        validator_.validate(workflow_data);
+    }
+    catch (const std::exception& e) {
+        result.valid = false;
+        result.status_str = error_msg::SCHEMA_VALIDATION_FAILED;
+        result.errors_msg = std::string("Schema validation error: ") + e.what();
 
-    res = co_await DBFactory::get_database().add_workflow_async(workflow_full_data, rejection_reason);
-    if (!res) {
-        co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
-
-        co_return result;
+        return false;
     }
 
-    co_await handle_request_accepted(result, workflow_request_info);
+    request_info.client_id = workflow_data.value("client_id", std::string());
+    request_info.request_id = workflow_data.value("request_id", std::string());
+    request_info.workflow_id = workflow_data.value("workflow_id", std::string());
+    request_info.workflow_payload_size_bytes = static_cast<int>(body.size());
+    request_info.operation = "CREATE";
+    to_string(RequestStatus::RECEIVED, request_info.status);
 
-    co_return result;
+    return true;
+}
+
+bool WorkflowService::get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result) {
+    if (!get_client_config(client_id, client_config)) {
+        result.valid = false;
+        result.status_str = error_msg::CLIENT_NOT_FOUND;
+        result.errors_msg = std::string(error_msg::CLIENT_NOT_FOUND);
+        return false;
+    }
+    
+    return true;
+}
+
+boost::asio::awaitable<bool> WorkflowService::admit_request(const RequestData& request_info, 
+                                                            const RateLimitConfig& rate_limit_config, 
+                                                            std::string& rejection_reason) {
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    co_return co_await redis_db->admit_request_async(request_info.client_id,
+                                                      request_info.request_id,
+                                                      request_info.workflow_id,  
+                                                      rate_limit_config.max_concurrent_workflows,  
+                                                      rate_limit_config.max_requests,  
+                                                      rate_limit_config.window_sec,  
+                                                      rejection_reason);  
+}
+
+boost::asio::awaitable<bool> WorkflowService::persist_request(const RequestData& request_info, 
+                                                              const std::string& body, 
+                                                              const ClientConfig& client_config, 
+                                                              std::string& rejection_reason) {
+    co_return co_await DBFactory::get_database().add_request_async(request_info, body, 
+                                                                   client_config, rejection_reason);
+}
+
+bool WorkflowService::validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
+                                        std::unordered_map<std::string, DagData>& jobs_map, 
+                                        WorkflowfullData& workflow_info,
+                                        std::string& rejection_reason) {
+    if (!validate_admission_client_workflow_policy(workflow_data, policy_config, rejection_reason)) {
+        return false;
+    }
+
+    if (!validate_semantic(workflow_data, jobs_map, rejection_reason)) {
+        return false;
+    }
+
+    if (!validate_dependencies(workflow_data, jobs_map, rejection_reason)) {
+        return false;
+    }
+
+    // Extract the workflow info from the received data
+    workflow_info.workflow_type = workflow_data.value("workflow_type", std::string());
+    workflow_info.total_jobs = static_cast<int>(workflow_data["jobs"].size());
+    workflow_info.workflow_version = Config::get_config().workflow().version;
+    to_string(WorkflowStatus::ADMITTED, workflow_info.status);
+
+    return true;
+}
+
+boost::asio::awaitable<bool> WorkflowService::persist_workflow(const WorkflowfullData& workflow_info, std::string& rejection_reason) {
+    co_return co_await DBFactory::get_database().add_workflow_async(workflow_info, rejection_reason);
 }
 
 bool WorkflowService::validate_admission_client_workflow_policy(const json& workflow_data,  
@@ -279,10 +308,10 @@ bool WorkflowService::validate_dependencies(const json& data,
 
 
 
-awaitable<void> WorkflowService::handle_request_rejection(ValidationResult& result, 
-                                                          RequestData& request_info, 
-                                                          const std::string& rejection_reason,
-                                                          bool update_redis) {
+awaitable<ValidationResult> WorkflowService::handle_request_rejection(ValidationResult& result, 
+                                                                      RequestData& request_info, 
+                                                                      const std::string& rejection_reason,
+                                                                      bool update_redis) {
     std::string reject_status;
     to_string(RequestStatus::REJECTED, reject_status);
 
@@ -300,10 +329,12 @@ awaitable<void> WorkflowService::handle_request_rejection(ValidationResult& resu
 
     // Update request status in the database
     co_await DBFactory::get_database().update_request_status_async(request_info);
+
+    co_return result;
 }
 
-awaitable<void> WorkflowService::handle_request_accepted(ValidationResult& result, 
-                                                          RequestData& request_info) {
+awaitable<ValidationResult> WorkflowService::handle_request_accepted(ValidationResult& result, 
+                                                                     RequestData& request_info) {
     std::string ok_status;
     to_string(RequestStatus::COMPLETED, ok_status);
 
@@ -314,6 +345,8 @@ awaitable<void> WorkflowService::handle_request_accepted(ValidationResult& resul
 
     // Update request status in the database
     co_await DBFactory::get_database().update_request_status_async(request_info);
+
+    co_return result;
 }
 
 awaitable<void> WorkflowService::update_redis_request_status(const RequestData& request_info) {
