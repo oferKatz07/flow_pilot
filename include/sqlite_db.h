@@ -67,9 +67,17 @@ public:
 
     bool add_request(
         const RequestData& request_data,
-        const std::string& workflow_payload,
         std::string& error_message
     ) override;
+
+    bool add_request(
+        const RequestData& request_data,
+        const std::string& workflow_payload,
+        const ClientConfig& client_config,
+        std::string& error_message
+    ) override;
+
+    bool update_request_status(const RequestData& request_data) override;
 
     bool add_workflow(
         const WorkflowfullData& workflow_data,
@@ -85,7 +93,7 @@ public:
 private:
     explicit SQLiteDatabase(const std::string& db_path);
     bool create_schema() override;
-    bool get_client_active_workflows_count(std::string& client_id, int& active_workflows) override;
+    bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) override;
 
     void init_db();
     void create_rate_limit_plans_table();
@@ -102,10 +110,10 @@ private:
         const char* sql,
         const std::function<void(sqlite3_stmt*)>& binder,
         const std::function<std::string(int, const char*)>& failure_handler);
-    size_t get_client_active_requests(std::string& client_id);
     bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
 
     std::string db_path_;
     sqlite3* db_ = nullptr;
 };
+
 } // namespace flow_pilot

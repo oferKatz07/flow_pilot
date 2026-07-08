@@ -1,4 +1,4 @@
-// sqlite_db.h - SQLite persistence interface for FlowPilot
+// db_interface.h - Database interface for FlowPilot
 
 #pragma once
 
@@ -41,9 +41,40 @@ inline ClientStatus client_status_from_string(const std::string& str) {
     throw std::invalid_argument("Unknown ClientStatus: " + str);
 }
 
-enum class WorkflowStatus {
+
+enum class RequestStatus {
     RECEIVED,
     REJECTED,
+    COMPLETED,
+};
+
+inline bool to_string(RequestStatus status, std::string& str) {
+    switch(status) {
+        case RequestStatus::RECEIVED: str = "RECEIVED"; return true;
+        case RequestStatus::REJECTED: str = "REJECTED"; return true;
+        case RequestStatus::COMPLETED: str = "COMPLETED"; return true;
+        default: return false;
+    }
+}
+
+inline bool request_status_from_string(const std::string& str, RequestStatus& request_status) {
+    if (str == "RECEIVED") {
+        request_status = RequestStatus::RECEIVED;
+        return true;
+    }
+    if (str == "REJECTED") {
+        request_status = RequestStatus::REJECTED;
+        return true;
+    }
+    if (str == "COMPLETED") {
+        request_status = RequestStatus::COMPLETED;
+        return true;
+    }
+    return false;
+}
+
+
+enum class WorkflowStatus {
     ADMITTED,
     RUNNING,
     COMPLETED,
@@ -54,8 +85,6 @@ enum class WorkflowStatus {
 // Conversion functions for WorkflowStatus
 inline bool to_string(WorkflowStatus status, std::string& str) {
     switch(status) {
-        case WorkflowStatus::RECEIVED: str = "RECEIVED"; return true;
-        case WorkflowStatus::REJECTED: str = "REJECTED"; return true;
         case WorkflowStatus::ADMITTED: str = "ADMITTED"; return true;
         case WorkflowStatus::RUNNING: str = "RUNNING"; return true;
         case WorkflowStatus::COMPLETED: str = "COMPLETED"; return true;
@@ -66,16 +95,8 @@ inline bool to_string(WorkflowStatus status, std::string& str) {
 }
 
 inline bool workflow_status_from_string(const std::string& str, WorkflowStatus& workflow_status) {
-    if (str == "RECEIVED") {
-        workflow_status = WorkflowStatus::RECEIVED;
-        return true;
-    }
     if (str == "ADMITTED") {
         workflow_status = WorkflowStatus::ADMITTED;
-        return true;
-    }
-    if (str == "REJECTED") {
-        workflow_status = WorkflowStatus::REJECTED;
         return true;
     }
     if (str == "RUNNING") {
@@ -214,12 +235,22 @@ public:
         const std::string& policy_plan_name
     ) = 0;
 
-    // Add a new received request
+    // Add a new received rejected request
+    virtual bool add_request(
+        const RequestData& request_data,
+        std::string& error_message
+    ) = 0;
+
+    // Add a new received request and perform validations
     virtual bool add_request(
         const RequestData& request_data,
         const std::string& workflow_payload,
+        const ClientConfig& client_config,
         std::string& error_message
     ) = 0;
+
+    // Update the request status in the DB. This is used for durability and auditing of request processing.
+    virtual bool update_request_status(const RequestData& request_data) = 0;
 
     // Add a new workflow data to the DB. This is used for durability and auditing of workflow submissions.
     virtual bool add_workflow(
@@ -239,7 +270,7 @@ public:
 private:
     /// Create required tables and indexes if they do not exist.
     virtual bool create_schema() = 0;
-    virtual bool get_client_active_workflows_count(std::string& client_id, int& active_workflows) = 0;
+    virtual bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) = 0;
 };
 
 } // namespace flow_pilot

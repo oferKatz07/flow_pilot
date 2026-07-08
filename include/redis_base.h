@@ -9,11 +9,11 @@
 
 namespace flow_pilot {
 
-enum class RequestStatus {
-    VALIDATING,
-    ACCEPTED,
-    COMPLETED
-};
+// enum class RequestStatus {
+//     VALIDATING,
+//     ACCEPTED,
+//     COMPLETED
+// };
 
 struct RedisReply {
     enum class Type {

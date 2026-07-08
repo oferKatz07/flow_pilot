@@ -64,12 +64,12 @@ static http::response<http::string_body> make_header_only_response(
 static std::string build_validation_error_response(const ValidationResult& result){
     json response;
     response["status"] = "validation_failed";
-    response["message"] = result.message;
-    response["errors"].push_back(result.errors);
+    response["message"] = result.status_str;
+    response["errors"].push_back(result.errors_msg);
     return response.dump();
 }
 
-static std::string build_validation_success_response(const std::string& workflow_id) {
+static std::string build_validation_success_response(const std::string_view& workflow_id) {
     json response;
     response["status"] = "accepted";
     response["message"] = "workflow validation successful";
@@ -87,18 +87,18 @@ WorkflowValidationHandler::handle(const HandlerCtxData& ctx) {
     Logger::get_instance()->info("Creating new workflow");
     ValidationResult validation = co_await workflow_service_.submit_workflow(ctx.request_body);
     if (!validation.valid) {
-        get_logger()->warn("Workflow validation failed: {}", validation.message);
-        if (validation.message == "Client not found") {
+        get_logger()->warn("Workflow validation failed: {}", validation.status_str);
+        if (validation.status_str == "Client not found") {
             co_return make_json_response(http::status::forbidden, ctx.keep_alive,
                 build_validation_error_response(validation));
-        } else if (validation.message == "Duplicate request") {
+        } else if (validation.status_str == "Duplicate request") {
             co_return make_json_response(http::status::conflict, ctx.keep_alive,
                 build_validation_error_response(validation));
-        } else if (validation.message == "Concurrent workflow limit exceeded" ||
-                   validation.message == "Rate limit exceeded") {
+        } else if (validation.status_str == "Concurrent workflow limit exceeded" ||
+                   validation.status_str == "Rate limit exceeded") {
             co_return make_json_response(http::status::too_many_requests, ctx.keep_alive,
                 build_validation_error_response(validation));
-        } else if (validation.message == "Internal DB failure") {
+        } else if (validation.status_str == "Internal DB failure") {
             co_return make_json_response(http::status::internal_server_error, ctx.keep_alive,
                 build_validation_error_response(validation));
         }
@@ -107,7 +107,7 @@ WorkflowValidationHandler::handle(const HandlerCtxData& ctx) {
     }
 
     co_return make_json_response(http::status::accepted, ctx.keep_alive,
-        build_validation_success_response(validation.message));
+        build_validation_success_response(validation.status_str));
 }
 
 // Handler for GET /api/v1/workflows

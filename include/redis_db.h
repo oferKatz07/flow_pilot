@@ -14,11 +14,11 @@ namespace flow_pilot {
 struct ServerConfig;
 struct InMemoryDBConfig;
 
-enum class RequestStatus {
-    VALIDATING,
-    ACCEPTED,
-    COMPLETED
-};
+// enum class RequestStatus {
+//     VALIDATING,
+//     ACCEPTED,
+//     COMPLETED
+// };
 
 struct RedisReply {
     enum class Type {

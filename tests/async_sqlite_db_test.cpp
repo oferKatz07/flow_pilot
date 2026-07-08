@@ -31,7 +31,7 @@ TEST(AsyncSQLiteDBTest, AddAndQueryWorkflow) {
 
     auto fut = boost::asio::co_spawn(ioc,
         [&]() -> boost::asio::awaitable<bool> {
-            co_return co_await async_db.add_workflow_async(wd, payload, err);
+            co_return co_await async_db.add_workflow_async(wd, err);
         },
         boost::asio::use_future);
 

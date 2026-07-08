@@ -483,7 +483,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     std::vector<std::string> lua_values;
     auto lua_ok = co_await execute_lua_script_async(lua_script, keys, script_args, lua_values);
     if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
-        rejection_reason = INTERNAL_DB_FAILURE;
+        rejection_reason = error_msg::INTERNAL_DB_FAILURE;
         co_return false;
     }
 
@@ -494,16 +494,16 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     }
 
     if (detail == "duplicate") {
-        rejection_reason = DUPLICATE_REQUEST;
+        rejection_reason = error_msg::DUPLICATE_REQUEST;
     } else if (detail == "rate_limit") {
-        rejection_reason = RATE_LIMIT_EXCEEDED;
+        rejection_reason = error_msg::RATE_LIMIT_EXCEEDED;
     } else if (detail == "active_limit") {
-        rejection_reason = CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
+        rejection_reason = error_msg::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
     } else if (detail == "duplicate_workflow") {
-        rejection_reason = WORKFLOW_ID_EXISTS;
+        rejection_reason = error_msg::WORKFLOW_ID_EXISTS;
     } else {
         Logger::get_instance()->error("Unexpected Lua script failure: {}", detail);
-        rejection_reason = INTERNAL_DB_FAILURE;
+        rejection_reason = error_msg::INTERNAL_DB_FAILURE;
     }
     co_return false;
 }

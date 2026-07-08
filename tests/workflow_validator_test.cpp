@@ -1,6 +1,6 @@
 #include "workflow_service.h"
 #include "config.h"
-#include "redis_db.h"
+#include "redis_db_async.h"
 #include <gtest/gtest.h>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/use_future.hpp>
@@ -21,15 +21,13 @@ static std::string generate_unique_id()
     return std::to_string(dist(rng));
 }
 
-static void clear_redis_keys(const std::string& pattern) {
-    auto redis = RedisDatabase::get_instance();
-    std::vector<std::string> args{
-        "EVAL",
-        "local keys=redis.call('KEYS', ARGV[1]); for i=1,#keys do redis.call('DEL', keys[i]); end; return #keys;",
-        "0",
-        pattern
-    };
-    redis->execute_command(args);
+template <typename T>
+static T run_async(boost::asio::io_context& ioc, boost::asio::awaitable<T> awaitable)
+{
+    auto future = boost::asio::co_spawn(ioc, std::move(awaitable), boost::asio::use_future);
+    ioc.restart();
+    ioc.run();
+    return future.get();
 }
 
 static ValidationResult submit_workflow_sync(boost::asio::io_context& ioc, WorkflowService& service, const std::string& body) {
@@ -69,14 +67,10 @@ protected:
         Config::get_config().redis().port = 6379;
 
         try {
-            init_redis_database(shared_redis_ioc, Config::get_config().redis());
+            RedisDatabaseAsync::init(shared_redis_ioc, Config::get_config().redis());
         } catch (const std::exception& ex) {
             GTEST_SKIP() << "Redis is not available for WorkflowService tests: " << ex.what();
         }
-
-        clear_redis_keys("fp:req:client_1:*");
-        clear_redis_keys("fp:active:client_1:workflows");
-        clear_redis_keys("fp:rate:client_1:*");
 
         service = std::make_unique<WorkflowService>(WORKFLOW_SCHEMA_PATH);
     }
@@ -91,9 +85,9 @@ TEST_F(WorkflowServiceTest, InvalidJson) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, invalid_json);
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.message, "Invalid JSON format");
-    EXPECT_FALSE(result.errors.empty());
-    EXPECT_TRUE(result.errors.find("Parse error") != std::string::npos);
+    EXPECT_EQ(result.status_str, "Invalid JSON format");
+    EXPECT_FALSE(result.errors_msg.empty());
+    EXPECT_TRUE(result.errors_msg.find("Parse error") != std::string::npos);
 }
 
 // Test missing required fields
@@ -105,8 +99,8 @@ TEST_F(WorkflowServiceTest, MissingRequiredFields) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.message, "Schema validation failed");
-    EXPECT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_FALSE(result.errors_msg.empty());
 }
 
 // Test invalid field types
@@ -121,8 +115,8 @@ TEST_F(WorkflowServiceTest, InvalidFieldTypes) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.message, "Schema validation failed");
-    EXPECT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_FALSE(result.errors_msg.empty());
 }
 
 // Test empty jobs array
@@ -137,8 +131,8 @@ TEST_F(WorkflowServiceTest, EmptyJobsArray) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.message, "Schema validation failed");
-    EXPECT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_FALSE(result.errors_msg.empty());
 }
 
 // Test invalid job structure - missing required fields
@@ -163,8 +157,8 @@ TEST_F(WorkflowServiceTest, InvalidJobStructure) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.message, "Schema validation failed");
-    EXPECT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_FALSE(result.errors_msg.empty());
 }
 
 // Test invalid job types
@@ -185,8 +179,8 @@ TEST_F(WorkflowServiceTest, InvalidJobTypes) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.message, "Schema validation failed");
-    EXPECT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_FALSE(result.errors_msg.empty());
 }
 
 // Test valid minimal workflow
@@ -207,8 +201,8 @@ TEST_F(WorkflowServiceTest, ValidMinimalWorkflow) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_TRUE(result.valid);
-    EXPECT_EQ(result.message, "Workflow validation successful");
-    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Workflow validation successful");
+    EXPECT_TRUE(result.errors_msg.empty());
 }
 
 // Test valid complex workflow with dependencies
@@ -254,8 +248,8 @@ TEST_F(WorkflowServiceTest, ValidComplexWorkflow) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_TRUE(result.valid);
-    EXPECT_EQ(result.message, "Workflow validation successful");
-    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Workflow validation successful");
+    EXPECT_TRUE(result.errors_msg.empty());
 }
 
 // Test workflow with optional fields
@@ -284,34 +278,34 @@ TEST_F(WorkflowServiceTest, WorkflowWithOptionalFields) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_TRUE(result.valid);
-    EXPECT_EQ(result.message, "Workflow validation successful");
-    EXPECT_TRUE(result.errors.empty());
+    EXPECT_EQ(result.status_str, "Workflow validation successful");
+    EXPECT_TRUE(result.errors_msg.empty());
 }
 
 
 TEST(RedisDatabaseTest, InvalidConnectionStringFails) {
-    std::shared_ptr<RedisDatabase> redis;
+    std::shared_ptr<RedisDatabaseAsync> redis;
     try {
-        redis = RedisDatabase::init(shared_redis_ioc);
+        redis = RedisDatabaseAsync::init(shared_redis_ioc);
     } catch (const std::exception& ex) {
         GTEST_SKIP() << "Redis unavailable for RedisDatabaseTest: " << ex.what();
     }
 
-    EXPECT_FALSE(redis->connect("redis://localhost"));
-    EXPECT_FALSE(redis->connect("redis://"));
+    EXPECT_FALSE(run_async(shared_redis_ioc, redis->connect_async("redis://localhost")));
+    EXPECT_FALSE(run_async(shared_redis_ioc, redis->connect_async("redis://")));
 }
 
 class ActualRedisDatabaseTest : public ::testing::Test {
 protected:
     void SetUp() override {
         try {
-            redis_ = RedisDatabase::init(shared_redis_ioc).get();
+            redis_ = RedisDatabaseAsync::init(shared_redis_ioc);
         } catch (const std::exception& ex) {
             GTEST_SKIP() << "Redis server is not available: " << ex.what();
         }
     }
 
-    RedisDatabase* redis_ = nullptr;
+    std::shared_ptr<RedisDatabaseAsync> redis_;
 };
 
 TEST_F(ActualRedisDatabaseTest, AdmitRequestLuaCreatesValidatingEntry) {
@@ -320,18 +314,20 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequestLuaCreatesValidatingEntry) {
     std::string workflow_id = "workflow-" + generate_unique_id();
     std::string rejection_reason;
 
-    EXPECT_TRUE(redis_->admit_request(client_id,
-                                     request_id,
-                                     workflow_id,
-                                     5,
-                                     5,
-                                     10,
-                                     rejection_reason));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id,
+                                                      request_id,
+                                                      workflow_id,
+                                                      5,
+                                                      5,
+                                                      10,
+                                                      rejection_reason)));
     EXPECT_TRUE(rejection_reason.empty());
 
-    auto status = redis_->fetch_request_status(client_id, request_id);
-    ASSERT_TRUE(status.has_value());
-    EXPECT_EQ(*status, "RECEIVED");
+    std::string status;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, request_id, status)));
+    EXPECT_EQ(status, "RECEIVED");
 }
 
 TEST_F(ActualRedisDatabaseTest, DuplicateRequestRejectedWithoutChangingExistingStatus) {
@@ -340,29 +336,33 @@ TEST_F(ActualRedisDatabaseTest, DuplicateRequestRejectedWithoutChangingExistingS
     std::string workflow_id = "workflow-" + generate_unique_id();
     std::string rejection_reason;
 
-    EXPECT_TRUE(redis_->admit_request(client_id,
-                                     request_id,
-                                     workflow_id,
-                                     5,
-                                     5,
-                                     10,
-                                     rejection_reason));
-    auto status_before = redis_->fetch_request_status(client_id, request_id);
-    ASSERT_TRUE(status_before.has_value());
-    EXPECT_EQ(*status_before, "RECEIVED");
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id,
+                                                      request_id,
+                                                      workflow_id,
+                                                      5,
+                                                      5,
+                                                      10,
+                                                      rejection_reason)));
+    std::string status_before;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, request_id, status_before)));
+    EXPECT_EQ(status_before, "RECEIVED");
 
-    EXPECT_FALSE(redis_->admit_request(client_id,
-                                      request_id,
-                                      workflow_id,
-                                      5,
-                                      5,
-                                      10,
-                                      rejection_reason));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->admit_request_async(client_id,
+                                                       request_id,
+                                                       workflow_id,
+                                                       5,
+                                                       5,
+                                                       10,
+                                                       rejection_reason)));
     EXPECT_EQ(rejection_reason, "Duplicate request detected");
 
-    auto status_after = redis_->fetch_request_status(client_id, request_id);
-    ASSERT_TRUE(status_after.has_value());
-    EXPECT_EQ(*status_after, *status_before);
+    std::string status_after;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, request_id, status_after)));
+    EXPECT_EQ(status_after, status_before);
 }
 
 TEST_F(ActualRedisDatabaseTest, RejectedRequestDoesNotAffectPreExistingRequestStatus) {
@@ -373,29 +373,33 @@ TEST_F(ActualRedisDatabaseTest, RejectedRequestDoesNotAffectPreExistingRequestSt
     std::string rejected_workflow_id = "workflow-" + generate_unique_id();
     std::string rejection_reason;
 
-    EXPECT_TRUE(redis_->admit_request(client_id,
-                                     accepted_request_id,
-                                     accepted_workflow_id,
-                                     5,
-                                     1,
-                                     10,
-                                     rejection_reason));
-    auto accepted_status_before = redis_->fetch_request_status(client_id, accepted_request_id);
-    ASSERT_TRUE(accepted_status_before.has_value());
-    EXPECT_EQ(*accepted_status_before, "RECEIVED");
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id,
+                                                      accepted_request_id,
+                                                      accepted_workflow_id,
+                                                      5,
+                                                      1,
+                                                      10,
+                                                      rejection_reason)));
+    std::string accepted_status_before;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, accepted_request_id, accepted_status_before)));
+    EXPECT_EQ(accepted_status_before, "RECEIVED");
 
-    EXPECT_FALSE(redis_->admit_request(client_id,
-                                      rejected_request_id,
-                                      rejected_workflow_id,
-                                      5,
-                                      1,
-                                      10,
-                                      rejection_reason));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->admit_request_async(client_id,
+                                                       rejected_request_id,
+                                                       rejected_workflow_id,
+                                                       5,
+                                                       1,
+                                                       10,
+                                                       rejection_reason)));
     EXPECT_EQ(rejection_reason, "Rate limit exceeded: too many workflow requests in the recent time window.");
 
-    auto accepted_status_after = redis_->fetch_request_status(client_id, accepted_request_id);
-    ASSERT_TRUE(accepted_status_after.has_value());
-    EXPECT_EQ(*accepted_status_after, *accepted_status_before);
+    std::string accepted_status_after;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, accepted_request_id, accepted_status_after)));
+    EXPECT_EQ(accepted_status_after, accepted_status_before);
 }
 
 TEST_F(ActualRedisDatabaseTest, AdmitRequest_RateLimitRejected_DoesNotAddWorkflow) {
@@ -407,20 +411,23 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequest_RateLimitRejected_DoesNotAddWorkflo
     std::string rejection_reason;
 
     // First request should succeed (max_requests = 1)
-    EXPECT_TRUE(redis_->admit_request(client_id, req1, wf1, 5, 1, 10, rejection_reason));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id, req1, wf1, 5, 1, 10, rejection_reason)));
     EXPECT_TRUE(rejection_reason.empty());
 
     // Second request within same window should be rate-limited and not add workflow
-    EXPECT_FALSE(redis_->admit_request(client_id, req2, wf2, 5, 1, 10, rejection_reason));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->admit_request_async(client_id, req2, wf2, 5, 1, 10, rejection_reason)));
     EXPECT_EQ(rejection_reason, "Rate limit exceeded: too many workflow requests in the recent time window.");
 
     // Ensure wf2 was not left in the active set
-    EXPECT_FALSE(redis_->remove_active_workflow(client_id, wf2));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->remove_active_workflow_async(client_id, wf2)));
 
     // Cleanup
-    redis_->remove_active_workflow(client_id, wf1);
-    redis_->release_request_id(client_id, req1);
-    redis_->release_request_id(client_id, req2);
+    run_async(shared_redis_ioc, redis_->remove_active_workflow_async(client_id, wf1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
 }
 
 TEST_F(ActualRedisDatabaseTest, AdmitRequest_ActiveLimitRejected_RollsBack) {
@@ -432,20 +439,23 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequest_ActiveLimitRejected_RollsBack) {
     std::string rejection_reason;
 
     // First request should occupy the single active slot
-    EXPECT_TRUE(redis_->admit_request(client_id, req1, wf1, 1, 100, 10, rejection_reason));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id, req1, wf1, 1, 100, 10, rejection_reason)));
     EXPECT_TRUE(rejection_reason.empty());
 
     // Second request should be rejected due to active limit and should not be added
-    EXPECT_FALSE(redis_->admit_request(client_id, req2, wf2, 1, 100, 10, rejection_reason));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->admit_request_async(client_id, req2, wf2, 1, 100, 10, rejection_reason)));
     EXPECT_EQ(rejection_reason, "Client exceeded the maximum allowed concurrent workflows.");
 
     // Ensure wf2 was not left in the active set
-    EXPECT_FALSE(redis_->remove_active_workflow(client_id, wf2));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->remove_active_workflow_async(client_id, wf2)));
 
     // Cleanup
-    redis_->remove_active_workflow(client_id, wf1);
-    redis_->release_request_id(client_id, req1);
-    redis_->release_request_id(client_id, req2);
+    run_async(shared_redis_ioc, redis_->remove_active_workflow_async(client_id, wf1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
 }
 
 TEST_F(ActualRedisDatabaseTest, AdmitRequest_ExistingWorkflowIdIsIdempotent) {
@@ -456,29 +466,35 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequest_ExistingWorkflowIdIsIdempotent) {
     std::string rejection_reason;
 
     // First admission should succeed
-    EXPECT_TRUE(redis_->admit_request(client_id, req1, wf, 5, 100, 10, rejection_reason));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id, req1, wf, 5, 100, 10, rejection_reason)));
     EXPECT_TRUE(rejection_reason.empty());
 
     // Second admission with a different request_id but same workflow_id should also succeed
-    EXPECT_TRUE(redis_->admit_request(client_id, req2, wf, 5, 100, 10, rejection_reason));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id, req2, wf, 5, 100, 10, rejection_reason)));
     EXPECT_TRUE(rejection_reason.empty());
 
     // Both request statuses should exist
-    auto status1 = redis_->fetch_request_status(client_id, req1);
-    ASSERT_TRUE(status1.has_value());
-    EXPECT_EQ(*status1, "RECEIVED");
+    std::string status1;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, req1, status1)));
+    EXPECT_EQ(status1, "RECEIVED");
 
-    auto status2 = redis_->fetch_request_status(client_id, req2);
-    ASSERT_TRUE(status2.has_value());
-    EXPECT_EQ(*status2, "RECEIVED");
+    std::string status2;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, req2, status2)));
+    EXPECT_EQ(status2, "RECEIVED");
 
     // Ensure the workflow ID was not duplicated in the active set by removing it once
-    EXPECT_TRUE(redis_->remove_active_workflow(client_id, wf));
-    EXPECT_FALSE(redis_->remove_active_workflow(client_id, wf));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->remove_active_workflow_async(client_id, wf)));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->remove_active_workflow_async(client_id, wf)));
 
     // Cleanup request entries
-    redis_->release_request_id(client_id, req1);
-    redis_->release_request_id(client_id, req2);
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
 }
 
 int main(int argc, char **argv) {

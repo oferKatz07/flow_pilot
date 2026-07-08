@@ -324,8 +324,7 @@ bool SQLiteDatabase::get_user_config(ClientData& user_data) const {
 }
 
 
-bool SQLiteDatabase::add_request(const RequestData& request_data, const std::string& workflow_payload,
-                                 std::string& error_message) {
+bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& error_message) {                                 
     const sqlite3_int64 now = static_cast<sqlite3_int64>(std::time(nullptr));
     const char* sql = "INSERT INTO workflow_requests (client_id, request_id, workflow_id, payload_size, operation_type, \
                                                       status, reject_reason, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
@@ -354,21 +353,77 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, const std::str
         std::string msg;
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: request id=") + request_data.request_id + " client_id=" + request_data.client_id;
-            error_message = DUPLICATE_REQUEST;
+            error_message = error_msg::DUPLICATE_REQUEST;
         } else {
             msg = std::string("Failed to insert request: ") + sqlite3_errmsg(db_);
-            error_message = INTERNAL_DB_FAILURE;
+            error_message = error_msg::INTERNAL_DB_FAILURE;
         }
         get_logger()->error(msg);
         ret_val = false;
     }
 
     sqlite3_finalize(stmt);
-    if (ret_val) {
-        // If the request was successfully added, also add the workflow payload to the database.
-        ret_val = add_request_payload(request_data, workflow_payload);
-    }
     return ret_val;
+}
+
+bool SQLiteDatabase::add_request(const RequestData& request_data,
+                                  const std::string& workflow_payload,
+                                  const ClientConfig& client_config,
+                                  std::string& error_message) {
+    // Add the request to the database
+    if (!add_request(request_data, error_message)) {
+        return false;
+    }
+
+    int concurrent_workflows;
+    if (!get_client_active_workflows_count(request_data.client_id, concurrent_workflows)) {
+        error_message = error_msg::INTERNAL_DB_FAILURE;
+        return false;
+    }
+
+    if (concurrent_workflows >= client_config.rate_limit_config.max_concurrent_workflows) {
+        error_message = error_msg::RATE_LIMIT_EXCEEDED;
+        return false;
+    }
+
+    if (request_data.workflow_payload_size_bytes > client_config.policy_config.max_workflow_size_kb * 1024) {
+        error_message = error_msg::WORKFLOW_SIZE_EXCEEDED;
+        return false;
+    }
+
+    if (!add_request_payload(request_data, workflow_payload)) {
+        Logger::get_instance()->error("Failed to add workflow payload for request_id={} client_id={}", request_data.request_id, request_data.client_id);
+    }
+
+    return true;
+}
+
+bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
+    const char* sql = "UPDATE workflow_requests SET status = ?, reject_reason = ?, updated_at = ? WHERE client_id = ? AND request_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        if (stmt) sqlite3_finalize(stmt);
+        return false;
+    }
+
+    sqlite3_bind_text(stmt, 1, request_data.status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, request_data.reject_reason.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(std::time(nullptr)));
+    sqlite3_bind_text(stmt, 4, request_data.client_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 5, request_data.request_id.c_str(), -1, SQLITE_TRANSIENT);
+    rc = sqlite3_step(stmt);
+    if (rc != SQLITE_DONE) {
+        get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    sqlite3_finalize(stmt);
+    
+    return true;
 }
 
 bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
@@ -407,10 +462,10 @@ bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
         std::string msg;
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id;
-            error_message = DUPLICATE_REQUEST;
+            error_message = error_msg::DUPLICATE_REQUEST;
         } else {
             msg = std::string("Failed to insert workflow (workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id + "): " + sqlite3_errmsg(db_);
-            error_message = INTERNAL_DB_FAILURE;
+            error_message = error_msg::INTERNAL_DB_FAILURE;
         }
         get_logger()->error(msg);
         ret_val = false;
@@ -572,7 +627,7 @@ bool SQLiteDatabase::add_request_payload(const RequestData& request_data, const 
     return ret_val;
 }
 
-bool SQLiteDatabase::get_client_active_workflows_count(std::string& client_id, int& active_workflows) {
+bool SQLiteDatabase::get_client_active_workflows_count(const std::string& client_id, int& active_workflows) {
     const char* sql = "SELECT COUNT(*) FROM workflows WHERE client_id = ? AND status IN ('ADMITTED', 'RUNNING');";
     sqlite3_stmt* stmt;
     bool ret_val = true;
