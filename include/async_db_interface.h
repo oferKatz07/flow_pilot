@@ -29,6 +29,10 @@ public:
     virtual boost::asio::awaitable<bool> update_request_status_async(
         const RequestData& request_data) = 0;
 
+    virtual boost::asio::awaitable<bool> get_all_requests_for_client_async(
+        const std::string& client_id,
+        std::vector<RequestData>& requests) const = 0;
+
     virtual boost::asio::awaitable<bool> add_workflow_async(
         const WorkflowfullData& workflow_data,
         std::string& error_message) = 0;

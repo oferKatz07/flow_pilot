@@ -330,12 +330,14 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
                                                       status, reject_reason, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     bool ret_val = true;
+    std::string msg;
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        error_message = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
-        get_logger()->error(error_message);
+        msg = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
+        get_logger()->error(msg);
         if (stmt) sqlite3_finalize(stmt);
+        error_message = error_msg::INTERNAL_DB_FAILURE;
         return false;
     }
 
@@ -350,7 +352,6 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        std::string msg;
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: request id=") + request_data.request_id + " client_id=" + request_data.client_id;
             error_message = error_msg::DUPLICATE_REQUEST;
@@ -399,7 +400,7 @@ bool SQLiteDatabase::add_request(const RequestData& request_data,
 }
 
 bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
-    const char* sql = "UPDATE workflow_requests SET status = ?, reject_reason = ?, updated_at = ? WHERE client_id = ? AND request_id = ?;";
+    const char* sql = "UPDATE workflow_requests SET status = ?, reject_reason = ? WHERE client_id = ? AND request_id = ?;";
     sqlite3_stmt* stmt = nullptr;
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
@@ -411,9 +412,8 @@ bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
 
     sqlite3_bind_text(stmt, 1, request_data.status.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, request_data.reject_reason.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(std::time(nullptr)));
-    sqlite3_bind_text(stmt, 4, request_data.client_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 5, request_data.request_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, request_data.client_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, request_data.request_id.c_str(), -1, SQLITE_TRANSIENT);
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
@@ -426,6 +426,38 @@ bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
     return true;
 }
 
+bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const {
+    const char* sql = "SELECT client_id, request_id, workflow_id, payload_size, operation_type, \
+                       status, reject_reason FROM workflow_requests WHERE client_id = ?;";
+    sqlite3_stmt* stmt = nullptr;
+    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        if (stmt) sqlite3_finalize(stmt);
+        return false;
+    }
+    sqlite3_bind_text(stmt, 1, client_id.c_str(), -1, SQLITE_TRANSIENT);
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        RequestData rd;
+        const unsigned char* cid = sqlite3_column_text(stmt, 0);
+        const unsigned char* rid = sqlite3_column_text(stmt, 1);
+        const unsigned char* wid = sqlite3_column_text(stmt, 2);
+        const unsigned char* wfs = sqlite3_column_text(stmt, 3);
+        const unsigned char* op = sqlite3_column_text(stmt, 4);
+        const unsigned char* st = sqlite3_column_text(stmt, 5);
+        const unsigned char* rr = sqlite3_column_text(stmt, 6);
+        rd.client_id = cid ? reinterpret_cast<const char*>(cid) : std::string();
+        rd.request_id = rid ? reinterpret_cast<const char*>(rid) : std::string();
+        rd.workflow_id = wid ? reinterpret_cast<const char*>(wid) : std::string();
+        rd.workflow_payload_size_bytes = wfs ? std::stoi(reinterpret_cast<const char*>(wfs)) : 0;
+        rd.operation = op ? reinterpret_cast<const char*>(op) : std::string();
+        rd.status = st ? reinterpret_cast<const char*>(st) : std::string();
+        rd.reject_reason = rr ? reinterpret_cast<const char*>(rr) : std::string();
+        workflows.push_back(rd);
+    }
+    sqlite3_finalize(stmt);
+    return true;
+}
 bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
                                   std::string& error_message) {
     const char* sql = "INSERT INTO workflows (client_id, workflow_id, workflow_type, version, status, total_jobs, \
@@ -500,7 +532,11 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
 }
 
 bool SQLiteDatabase::get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const {
-    const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status FROM workflows WHERE status IN ('RECEIVED', 'ADMITTED', 'RUNNING');";
+    std::string admitted_status;
+    std::string running_status;
+    to_string(WorkflowStatus::ADMITTED, admitted_status);
+    to_string(WorkflowStatus::RUNNING, running_status);
+    const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status FROM workflows WHERE status IN (?, ?);";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -508,6 +544,10 @@ bool SQLiteDatabase::get_all_active_workflows(std::vector<WorkflowfullData>& wor
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
+
+    sqlite3_bind_text(stmt, 1, admitted_status.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, running_status.c_str(), -1, SQLITE_TRANSIENT);
+
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         WorkflowfullData wd;
         const unsigned char* cid = sqlite3_column_text(stmt, 0);
@@ -520,7 +560,7 @@ bool SQLiteDatabase::get_all_active_workflows(std::vector<WorkflowfullData>& wor
         wd.workflow_type = wt ? reinterpret_cast<const char*>(wt) : std::string();
         wd.workflow_version = wv ? reinterpret_cast<const char*>(wv) : std::string();
         wd.status = st ? reinterpret_cast<const char*>(st) : std::string();
-        workflows.push_back(wd);
+        workflows.push_back(std::move(wd));
     }
     sqlite3_finalize(stmt);
     return true;
@@ -537,18 +577,18 @@ bool SQLiteDatabase::get_all_workflows_for_client(const std::string& client_id, 
     }
     sqlite3_bind_text(stmt, 1, client_id.c_str(), -1, SQLITE_TRANSIENT);
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-        WorkflowfullData wd;
+        WorkflowfullData wf;
         const unsigned char* cid = sqlite3_column_text(stmt, 0);
         const unsigned char* wid = sqlite3_column_text(stmt, 1);
         const unsigned char* wt = sqlite3_column_text(stmt, 2);
         const unsigned char* wv = sqlite3_column_text(stmt, 3);
         const unsigned char* st = sqlite3_column_text(stmt, 4);
-        wd.info.client_id = cid ? reinterpret_cast<const char*>(cid) : std::string();
-        wd.info.workflow_id = wid ? reinterpret_cast<const char*>(wid) : std::string();
-        wd.workflow_type = wt ? reinterpret_cast<const char*>(wt) : std::string();
-        wd.workflow_version = wv ? reinterpret_cast<const char*>(wv) : std::string();
-        wd.status = st ? reinterpret_cast<const char*>(st) : std::string();
-        workflows.push_back(wd);
+        wf.info.client_id = cid ? reinterpret_cast<const char*>(cid) : std::string();
+        wf.info.workflow_id = wid ? reinterpret_cast<const char*>(wid) : std::string();
+        wf.workflow_type = wt ? reinterpret_cast<const char*>(wt) : std::string();
+        wf.workflow_version = wv ? reinterpret_cast<const char*>(wv) : std::string();
+        wf.status = st ? reinterpret_cast<const char*>(st) : std::string();
+        workflows.push_back(wf);
     }
     sqlite3_finalize(stmt);
     return true;
@@ -563,40 +603,6 @@ bool SQLiteDatabase::create_schema() {
     create_workflow_payload_table();
     create_jobs_table();
     create_users_stats_table();
-    return true;
-}
-
-bool SQLiteDatabase::rollback(const std::string& error_message) {
-    if (sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr) != SQLITE_OK) {
-        get_logger()->error("SQLite rollback failed: {}", sqlite3_errmsg(db_));
-    }
-    get_logger()->error(error_message);
-    return false;
-}
-
-bool SQLiteDatabase::execute_statement(
-    const char* sql,
-    const std::function<void(sqlite3_stmt*)>& binder,
-    const std::function<std::string(int, const char*)>& failure_handler) {
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        if (stmt) {
-            sqlite3_finalize(stmt);
-        }
-        return rollback(failure_handler(rc, sqlite3_errmsg(db_)));
-    }
-
-    if (binder) {
-        binder(stmt);
-    }
-
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    if (rc != SQLITE_DONE) {
-        return rollback(failure_handler(rc, sqlite3_errmsg(db_)));
-    }
-
     return true;
 }
 

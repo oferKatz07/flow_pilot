@@ -2,8 +2,6 @@
 
 #pragma once
 
-#include <functional>
-#include <optional>
 #include <string>
 #include <unordered_map>
 #include <sqlite3.h>
@@ -79,6 +77,8 @@ public:
 
     bool update_request_status(const RequestData& request_data) override;
 
+    bool get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const;
+
     bool add_workflow(
         const WorkflowfullData& workflow_data,
         std::string& error_message
@@ -105,11 +105,6 @@ private:
     void create_users_stats_table();
     void create_workflow_payload_table();
     void create_table(const char* ddl_cmd);
-    bool rollback(const std::string& error_message);
-    bool execute_statement(
-        const char* sql,
-        const std::function<void(sqlite3_stmt*)>& binder,
-        const std::function<std::string(int, const char*)>& failure_handler);
     bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
 
     std::string db_path_;

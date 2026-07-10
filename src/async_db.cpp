@@ -53,6 +53,15 @@ boost::asio::awaitable<bool> AsyncDatabase::update_request_status_async(
     co_return db_.update_request_status(request_data);
 }
 
+boost::asio::awaitable<bool> AsyncDatabase::get_all_requests_for_client_async(
+    const std::string& client_id,
+    std::vector<RequestData>& requests) const
+{
+    auto executor = pool_.get_executor();
+    co_await boost::asio::post(executor, boost::asio::use_awaitable);
+    co_return db_.get_all_requests_for_client(client_id, requests);
+}
+
 boost::asio::awaitable<bool> AsyncDatabase::add_workflow_async(
     const WorkflowfullData& workflow_data,
     std::string& error_message)

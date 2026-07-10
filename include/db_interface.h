@@ -241,6 +241,9 @@ public:
         std::string& error_message
     ) = 0;
 
+    /// Get all workflows for the requested client from the DB. This is used for auditing and debugging purposes.
+    virtual bool get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const = 0;
+
     // Add a new received request and perform validations
     virtual bool add_request(
         const RequestData& request_data,
