@@ -7,8 +7,6 @@
 #include <sqlite3.h>
 
 #include "db_interface.h"
-#include "client_data.h"
-
 
 namespace flow_pilot {
 

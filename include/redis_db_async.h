@@ -1,3 +1,4 @@
+
 // redis_db.h - Redis persistence interface for FlowPilot
 
 #pragma once
@@ -16,8 +17,8 @@ class IRedisDatabaseAsync {
 public:
     virtual ~IRedisDatabaseAsync() = default;
 
-    virtual boost::asio::awaitable<bool> connect_async(const std::string& connection_string, 
-                                                       const std::string& password = {}) = 0;
+    virtual bool connect(const std::string& connection_string, const std::string& password = {}) = 0;
+    
     virtual boost::asio::awaitable<bool> request_exists_async(const std::string& client_id, 
                                                               const std::string& request_id) const = 0;
     virtual boost::asio::awaitable<bool> reserve_request_id_async(const std::string& client_id, 
@@ -58,7 +59,8 @@ public:
     RedisDatabaseAsync(RedisDatabaseAsync&&) = delete;
     RedisDatabaseAsync& operator=(RedisDatabaseAsync&&) = delete;
 
-    boost::asio::awaitable<bool> connect_async(const std::string& connection_string, const std::string& password = {}) override;
+    bool connect(const std::string& connection_string, const std::string& password = {}) override;
+
     boost::asio::awaitable<bool> request_exists_async(const std::string& client_id, const std::string& request_id) const override;
     boost::asio::awaitable<bool> reserve_request_id_async(const std::string& client_id, const std::string& request_id) override;
     boost::asio::awaitable<bool> release_request_id_async(const std::string& client_id, const std::string& request_id) override;

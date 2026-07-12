@@ -1,5 +1,5 @@
 
-// client_data.h - Data structures for client information in FlowPilot
+// client_config.h - Data structures for client information in FlowPilot
 
 #pragma once
 

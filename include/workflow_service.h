@@ -39,7 +39,7 @@ public:
 
      boost::asio::awaitable<ValidationResult> submit_workflow(const std::string& body);
 
-private:
+//private:
     bool parse_request(const std::string& body, json& workflow_data, 
                        RequestData& request_info, ValidationResult& result);
     bool get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result);
@@ -64,7 +64,7 @@ private:
     boost::asio::awaitable<ValidationResult> handle_request_rejection(ValidationResult& result, 
                                                                       RequestData& request_info, 
                                                                       const std::string& rejection_reason,
-                                                                      bool update_redis = true);
+                                                                      bool update_redis = false);
     boost::asio::awaitable<ValidationResult> handle_request_accepted(ValidationResult& result, 
                                                                      RequestData& request_info);
     boost::asio::awaitable<void> update_redis_request_status(const RequestData& request_info);                               

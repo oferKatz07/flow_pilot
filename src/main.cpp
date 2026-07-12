@@ -15,9 +15,9 @@
 int main(int argc, char* argv[])
 {
     try {
-        auto& server_config = flow_pilot::Config::get_config().server();
-        auto& redis_config = flow_pilot::Config::get_config().redis();
-        auto& sqlite_config = flow_pilot::Config::get_config().db_config();
+        auto& server_config = flow_pilot::Config::get().server();
+        auto& redis_config = flow_pilot::Config::get().redis();
+        auto& sqlite_config = flow_pilot::Config::get().db_config();
 
         for (int i = 1; i < argc; ++i) {
             std::string arg = argv[i];
@@ -55,7 +55,7 @@ int main(int argc, char* argv[])
         flow_pilot::get_logger()->info("Workflow service initialized with Redis at {}", redis_connection);
 
         // Initialize the persistent database (currently SQLite) based on configuration
-        auto& db = flow_pilot::DBFactory::get_database();
+        auto& db = flow_pilot::DBFactory::get();
         flow_pilot::get_logger()->info("Database initialized successfully at {}", sqlite_config.db_path);
 
         boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);

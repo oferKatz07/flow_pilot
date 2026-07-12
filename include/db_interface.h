@@ -6,9 +6,7 @@
 #include <vector>
 #include <unordered_map>
 
-#include "client_data.h"
-#include <stdexcept>
-
+#include "client_config.h"
 
 namespace flow_pilot {
 

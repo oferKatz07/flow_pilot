@@ -49,11 +49,11 @@ TEST(AsyncSQLiteDBTest, DuplicateRequestFails) {
     bool r2 = f2.get();
     EXPECT_FALSE(r2);
     EXPECT_FALSE(err2.empty());
-    EXPECT_EQ(err2, error_msg::DUPLICATE_REQUEST); // should be duplicate request error
+    EXPECT_EQ(err2, error_msgs::DUPLICATE_REQUEST); // should be duplicate request error
 }
 
 TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
-    Config::get_config().db_config().db_path = ":memory:";
+    Config::get().db_config().db_path = ":memory:";
     boost::asio::io_context ioc;
     auto& async_db = AsyncDatabase::get_instance();
 
@@ -111,7 +111,7 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
 
 TEST(AsyncSQLiteDBTest, AddAndQueryWorkflow) {
     // Use an in-memory DB for isolation
-    Config::get_config().db_config().db_path = ":memory:";
+    Config::get().db_config().db_path = ":memory:";
 
     boost::asio::io_context ioc;
     auto& async_db = AsyncDatabase::get_instance();
@@ -157,7 +157,7 @@ TEST(AsyncSQLiteDBTest, AddAndQueryWorkflow) {
 }
 
 TEST(AsyncSQLiteDBTest, UpdateWfStatusAndQueryActive) {
-    Config::get_config().db_config().db_path = ":memory:";
+    Config::get().db_config().db_path = ":memory:";
     boost::asio::io_context ioc;
     auto& async_db = AsyncDatabase::get_instance();
 

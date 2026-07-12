@@ -1,4 +1,5 @@
-// redis_db.cpp - Redis communication implementation for FlowPilot
+
+// redis_db_async.cpp - Redis communication implementation for FlowPilot
 
 #include <boost/asio.hpp>
 #include <boost/asio/connect.hpp>
@@ -6,12 +7,10 @@
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/use_future.hpp>
 #include <boost/asio/write.hpp>
 #include <sstream>
 #include <chrono>
 #include <ctime>
-#include <future>
 #include <stdexcept>
 
 #include "flow_pilot_error_msgs.h"
@@ -82,44 +81,33 @@ struct RedisDatabaseAsync::ImplAsync {
     explicit ImplAsync(boost::asio::io_context& ioc)
         : socket_(ioc), resolver_(ioc), read_buffer_() {}
 
-    boost::asio::awaitable<bool> connect_async(const std::string& host, const std::string& port, std::string& error_message)
+    bool connect(const std::string& host, const std::string& port, std::string& error_message)
     {
+        boost::system::error_code ec;
         if (socket_.is_open()) {
-            boost::system::error_code ec;
             socket_.close(ec);
         }
 
-        try {
-            auto endpoints = co_await resolver_.async_resolve(host, port, use_awaitable);
-            co_await boost::asio::async_connect(socket_, endpoints, use_awaitable);
-            co_return true;
-        } catch (const boost::system::system_error& ex) {
-            error_message = "Redis connect error: " + std::string(ex.what());
-            co_return false;
-        }
-    }
-
-    boost::asio::awaitable<bool> authenticate_async(const std::string& password, std::string& error_message)
-    {
-        if (password.empty()) {
-            co_return true;
+        auto endpoints = resolver_.resolve(host, port, ec);
+        if (ec) {
+            error_message = "Redis resolver error: " + ec.message();
+            return false;
         }
 
-        try {
-            std::vector<std::string> auth_args{"AUTH", password};
-            auto reply = co_await execute_async(auth_args);
-            if (reply.type != RedisReply::Type::SimpleString || reply.string_value != "OK") {
-                error_message = "Redis AUTH failed";
-                co_return false;
-            }
-            co_return true;
-        } catch (const RedisParseException& ex) {
-            error_message = ex.what();
-            co_return false;
-        } catch (const std::exception& ex) {
-            error_message = ex.what();
-            co_return false;
+        boost::asio::connect(socket_, endpoints, ec);
+        if (ec) {
+            error_message = "Redis connect error: " + ec.message();
+            return false;
         }
+
+        socket_.non_blocking(true, ec);
+        if (ec) {
+            error_message = "Failed to set Redis socket non-blocking: " + ec.message();
+            socket_.close(ec);
+            return false;
+        }
+
+        return true;
     }
 
     boost::asio::awaitable<RedisReply> execute_async(const std::vector<std::string>& args)
@@ -221,7 +209,13 @@ std::once_flag RedisDatabaseAsync::init_flag_;
 
 RedisDatabaseAsync::RedisDatabaseAsync(boost::asio::io_context& ioc)
     : impl_async_(std::make_unique<ImplAsync>(ioc))
-{}
+{
+    const InMemoryDBConfig& config = Config::get().redis();
+        std::string connection_string = config.host + ":" + std::to_string(config.port);
+        if (!connect(connection_string, config.password)) {
+            throw std::runtime_error("Unable to connect to Redis at " + connection_string);
+        }
+}
 
 RedisDatabaseAsync::~RedisDatabaseAsync() = default;
 
@@ -230,10 +224,7 @@ std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::init(boost::asio::io_con
     std::call_once(init_flag_, [&]() {
         auto instance = std::shared_ptr<RedisDatabaseAsync>(new RedisDatabaseAsync(ioc));
         std::string connection_string = config.host + ":" + std::to_string(config.port);
-        auto future = boost::asio::co_spawn(ioc,
-                                             instance->connect_async(connection_string, config.password),
-                                             boost::asio::use_future);
-        if (!future.get()) {
+        if (!instance->connect(connection_string, config.password)) {
             throw std::runtime_error("Unable to connect to Redis at " + connection_string);
         }
         instance_ = std::move(instance);
@@ -246,7 +237,7 @@ std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::init(boost::asio::io_con
 
 std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::init(boost::asio::io_context& ioc)
 {
-    return init(ioc, Config::get_config().redis());
+    return init(ioc, Config::get().redis());
 }
 
 std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::get_instance()
@@ -257,14 +248,14 @@ std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::get_instance()
     return instance_;
 }
 
-boost::asio::awaitable<bool> RedisDatabaseAsync::connect_async(const std::string& connection_string, const std::string& password)
+bool RedisDatabaseAsync::connect(const std::string& connection_string, const std::string& password)
 {
     std::string host = "127.0.0.1";
     std::string port = "6379";
     std::string auth_password = password;
     if (!connection_string.empty()) {
         if (!parse_connection_string(connection_string, host, port, auth_password)) {
-            co_return false;
+            return false;
         }
 
         if (host.empty()) {
@@ -277,25 +268,26 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::connect_async(const std::string
     }
 
     std::string error_message;
-    bool connected = co_await impl_async_->connect_async(host, port, error_message);
+    bool connected = impl_async_->connect(host, port, error_message);
     if (!connected) {
         auto logger = get_logger();
         logger->error("Redis connection failed: {}", error_message);
-        co_return false;
+        return false;
     }
-
-    if (!co_await impl_async_->authenticate_async(auth_password, error_message)) {
-        auto logger = get_logger();
-        logger->error("Redis authentication failed: {}", error_message);
-        co_return false;
-    }
+    // TBD Authentication is deffered to a later phase.
+    // The password is currently empty and we want to allow connecting without authentication first.
+    // if (!impl_async_->authenticate(auth_password, error_message)) {
+    //     auto logger = get_logger();
+    //     logger->error("Redis authentication failed: {}", error_message);
+    //     return false;
+    // }
 
     connection_string_ = connection_string;
     host_ = host;
     port_ = port;
     password_ = auth_password;
     connected_ = true;
-    co_return true;
+    return true;
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::execute_integer_command_async(const std::vector<std::string>& args, 
@@ -483,7 +475,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     std::vector<std::string> lua_values;
     auto lua_ok = co_await execute_lua_script_async(lua_script, keys, script_args, lua_values);
     if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
-        rejection_reason = error_msg::INTERNAL_DB_FAILURE;
+        rejection_reason = error_msgs::INTERNAL_DB_FAILURE;
         co_return false;
     }
 
@@ -494,16 +486,16 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     }
 
     if (detail == "duplicate") {
-        rejection_reason = error_msg::DUPLICATE_REQUEST;
+        rejection_reason = error_msgs::DUPLICATE_REQUEST;
     } else if (detail == "rate_limit") {
-        rejection_reason = error_msg::RATE_LIMIT_EXCEEDED;
+        rejection_reason = error_msgs::RATE_LIMIT_EXCEEDED;
     } else if (detail == "active_limit") {
-        rejection_reason = error_msg::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
+        rejection_reason = error_msgs::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
     } else if (detail == "duplicate_workflow") {
-        rejection_reason = error_msg::WORKFLOW_ID_EXISTS;
+        rejection_reason = error_msgs::WORKFLOW_ID_EXISTS;
     } else {
         Logger::get_instance()->error("Unexpected Lua script failure: {}", detail);
-        rejection_reason = error_msg::INTERNAL_DB_FAILURE;
+        rejection_reason = error_msgs::INTERNAL_DB_FAILURE;
     }
     co_return false;
 }

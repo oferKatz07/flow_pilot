@@ -46,25 +46,34 @@ struct InMemoryDBConfig {
 
 // set default values for the database configuration
 struct DBConfig {
-    enum class DBType {
+    enum class DBTypes {
         ASYNC_SQLITE,
         POSTGRESQL
     };
 
-    DBType db_type = DBType::ASYNC_SQLITE;
+    DBTypes db_type = DBTypes::ASYNC_SQLITE;
     std::string db_path = "db/flow_pilot.db";
+};
+
+struct ClientDataConfig {
+    enum class ConfigManagerTypes{
+        SQLITE_MANAGER,
+        TEST_MANAGER
+    };
+
+    ConfigManagerTypes config_type = ConfigManagerTypes::SQLITE_MANAGER;
 };
 
 // Workflow default configuration
 struct WorkflowConfig {
     std::string version = "v1.0";
-    std::string workflow_schema_path = "schemas/workflow_schema.json";
+    std::string workflow_schema_path = "schema/workflow_request.schema.json";
 };
 
 // Global configuration instance
 class Config {
 public:
-    static Config& get_config() {
+    static Config& get() {
         static Config instance;
         return instance;
     }
@@ -78,6 +87,9 @@ public:
 
     DBConfig& db_config() { return db_config_; }
     const DBConfig& db_config() const { return db_config_; }
+
+    ClientDataConfig& client_config() { return client_config_; }
+    const ClientDataConfig& client_config() const { return client_config_; }
 
     WorkflowConfig& workflow() { return workflow_config_; }
     const WorkflowConfig& workflow() const { return workflow_config_; }
@@ -96,6 +108,7 @@ private:
     LoggerConfig logger_config_;
     InMemoryDBConfig redis_config_;
     DBConfig db_config_;
+    ClientDataConfig client_config_;
     WorkflowConfig workflow_config_;
 };
 

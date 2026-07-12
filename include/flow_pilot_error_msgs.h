@@ -5,7 +5,7 @@
 
 #include <string>
 
-namespace flow_pilot::error_msg {
+namespace flow_pilot::error_msgs {
 
 // Validation Errors dtrings:
 inline constexpr std::string_view  INVALID_JSON_FORMAT = "Invalid JSON format";

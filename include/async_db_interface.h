@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "client_data.h"
+#include "client_config.h"
 #include "db_interface.h"
 
 namespace flow_pilot {

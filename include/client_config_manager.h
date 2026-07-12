@@ -4,28 +4,28 @@
 
 #include <unordered_map>
 #include <string>
-#include "client_data.h"
+
+#include "client_config.h"
+#include "client_config_manager_interface.h"
 
 namespace flow_pilot {
 
-class ClientDataManager {
+class ClientConfigManager : public IClientConfigManager {
 public:
-    ClientDataManager();
+    virtual ~ClientConfigManager() = default;
+    ClientConfigManager() = default;
 
     const std::unordered_map<std::string, RateLimitConfig>& rate_limit_plans() const { return rate_limit_plans_; }
     const std::unordered_map<std::string, PolicyPlan>& policy_plans() const { return policy_plans_; }
     const std::unordered_map<std::string, ClientData>& clients() const { return clients_; }
 
-private:
+protected:
     std::unordered_map<std::string, RateLimitConfig> rate_limit_plans_;
     std::unordered_map<std::string, PolicyPlan> policy_plans_;
     std::unordered_map<std::string, ClientData> clients_;
 
-    void load_from_db();
-    void ensure_defaults();
+    virtual void load_from_db() = 0;
+    virtual void ensure_defaults() = 0;
 };
-
-// Helper to fetch the resolved client config (rate + policy) by client id
-bool get_client_config(const std::string& client_id, ClientConfig& out);
 
 } // namespace flow_pilot

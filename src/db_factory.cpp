@@ -7,19 +7,22 @@
 
 namespace flow_pilot {
 
-DBFactory::DBFactory() {
-    if (Config::get_config().db_config().db_type == DBConfig::DBType::ASYNC_SQLITE) {
-        get_db_instance_ = []() -> IAsyncDatabase& {
-            return AsyncDatabase::get_instance();
-        };
-    } else {
-        throw std::runtime_error("Unsupported database type! not implemented yet");
-    }
+IAsyncDatabase& DBFactory::get() {
+    static IAsyncDatabase& instance = create_db();
+
+    return instance;
 }
 
-IAsyncDatabase& DBFactory::get_database() {
-    static DBFactory instance;
-    return instance.get_db_instance_();
+IAsyncDatabase& DBFactory::create_db() {
+    switch (Config::get().db_config().db_type) {
+        case DBConfig::DBTypes::ASYNC_SQLITE:
+            return AsyncDatabase::get_instance();
+        default:
+            throw std::runtime_error("Unsupported database type");
+    }
+    
+    // The code should not reach this point, but return a default instance to satisfy the compiler
+    return AsyncDatabase::get_instance();
 }
 
 }  // namespace flow_pilot

@@ -33,7 +33,7 @@ SQLiteDatabase::~SQLiteDatabase() {
 }
 
 IDatabase& SQLiteDatabase::get_instance() {
-    static SQLiteDatabase instance(Config::get_config().db_config().db_path);
+    static SQLiteDatabase instance(Config::get().db_config().db_path);
     return dynamic_cast<IDatabase&>(instance);
 }
 
@@ -337,7 +337,7 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
         msg = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
         get_logger()->error(msg);
         if (stmt) sqlite3_finalize(stmt);
-        error_message = error_msg::INTERNAL_DB_FAILURE;
+        error_message = error_msgs::INTERNAL_DB_FAILURE;
         return false;
     }
 
@@ -354,10 +354,10 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
     if (rc != SQLITE_DONE) {
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: request id=") + request_data.request_id + " client_id=" + request_data.client_id;
-            error_message = error_msg::DUPLICATE_REQUEST;
+            error_message = error_msgs::DUPLICATE_REQUEST;
         } else {
             msg = std::string("Failed to insert request: ") + sqlite3_errmsg(db_);
-            error_message = error_msg::INTERNAL_DB_FAILURE;
+            error_message = error_msgs::INTERNAL_DB_FAILURE;
         }
         get_logger()->error(msg);
         ret_val = false;
@@ -378,17 +378,17 @@ bool SQLiteDatabase::add_request(const RequestData& request_data,
 
     int concurrent_workflows;
     if (!get_client_active_workflows_count(request_data.client_id, concurrent_workflows)) {
-        error_message = error_msg::INTERNAL_DB_FAILURE;
+        error_message = error_msgs::INTERNAL_DB_FAILURE;
         return false;
     }
 
     if (concurrent_workflows >= client_config.rate_limit_config.max_concurrent_workflows) {
-        error_message = error_msg::RATE_LIMIT_EXCEEDED;
+        error_message = error_msgs::RATE_LIMIT_EXCEEDED;
         return false;
     }
 
     if (request_data.workflow_payload_size_bytes > client_config.policy_config.max_workflow_size_kb * 1024) {
-        error_message = error_msg::WORKFLOW_SIZE_EXCEEDED;
+        error_message = error_msgs::WORKFLOW_SIZE_EXCEEDED;
         return false;
     }
 
@@ -494,10 +494,10 @@ bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
         std::string msg;
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id;
-            error_message = error_msg::DUPLICATE_REQUEST;
+            error_message = error_msgs::DUPLICATE_REQUEST;
         } else {
             msg = std::string("Failed to insert workflow (workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id + "): " + sqlite3_errmsg(db_);
-            error_message = error_msg::INTERNAL_DB_FAILURE;
+            error_message = error_msgs::INTERNAL_DB_FAILURE;
         }
         get_logger()->error(msg);
         ret_val = false;

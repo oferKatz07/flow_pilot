@@ -78,7 +78,7 @@ static std::string build_validation_success_response(const std::string_view& wor
 }
 
 WorkflowValidationHandler::WorkflowValidationHandler()
-    : workflow_service_(Config::get_config().workflow().workflow_schema_path) {
+    : workflow_service_(Config::get().workflow().workflow_schema_path) {
 }
 
 // Handler for POST /api/v1/workflows - validate and submit workflow
@@ -189,7 +189,7 @@ IHandler& HandlerFactory::get_handler(const http::request<http::string_body>& re
     auto body = req.body();
     auto method = req.method();
 
-    if (body.size() > Config::get_config().server().max_request_body_size) {
+    if (body.size() > Config::get().server().max_request_body_size) {
         ctx.error_status_ = http::status::payload_too_large;
         return error_handler_;
     }

@@ -138,7 +138,7 @@ public:
 void run_http_server(asio::io_context& ioc)
 {
     Logger::get_instance()->info("Initializing FlowPilot HTTP server");
-    const ServerConfig& config = Config::get_config().server();
+    const ServerConfig& config = Config::get().server();
     auto const address = asio::ip::make_address(config.address);
     tcp::endpoint endpoint{address, config.port};
     auto listener_ptr = std::make_shared<listener>(ioc, endpoint);

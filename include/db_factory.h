@@ -2,9 +2,6 @@
 
 #pragma once
 
-#include <memory>
-#include <functional>
-
 #include "async_db_interface.h"
 
 namespace flow_pilot {
@@ -15,9 +12,9 @@ public:
     DBFactory& operator=(const DBFactory&) = delete;
     DBFactory(DBFactory&&) = delete;
     DBFactory& operator=(DBFactory&&) = delete;
-    static IAsyncDatabase& get_database();
+    static IAsyncDatabase& get();
 private:
     DBFactory();
-    std::function<IAsyncDatabase&()> get_db_instance_;
+    static IAsyncDatabase& create_db();
 };
 } // namespace flow_pilot

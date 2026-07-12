@@ -1,6 +1,3 @@
-#include "workflow_service.h"
-#include "config.h"
-#include "redis_db_async.h"
 #include <gtest/gtest.h>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/use_future.hpp>
@@ -8,6 +5,11 @@
 #include <chrono>
 #include <random>
 #include <memory>
+
+#include "flow_pilot_error_msgs.h"
+#include "workflow_service.h"
+#include "config.h"
+#include "redis_db_async.h"
 
 using namespace flow_pilot;
 using json = nlohmann::json;
@@ -62,17 +64,17 @@ class WorkflowServiceTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // Use an in-memory SQLite DB for test isolation and deterministic defaults
-        Config::get_config().db_config().db_path = ":memory:";
-        Config::get_config().redis().host = "127.0.0.1";
-        Config::get_config().redis().port = 6379;
+        Config::get().db_config().db_path = ":memory:";
+        Config::get().redis().host = "127.0.0.1";
+        Config::get().redis().port = 6379;
 
         try {
-            RedisDatabaseAsync::init(shared_redis_ioc, Config::get_config().redis());
+            RedisDatabaseAsync::init(shared_redis_ioc, Config::get().redis());
         } catch (const std::exception& ex) {
             GTEST_SKIP() << "Redis is not available for WorkflowService tests: " << ex.what();
         }
-
-        service = std::make_unique<WorkflowService>(WORKFLOW_SCHEMA_PATH);
+        std::string schema_path = "../" + Config::get().workflow().workflow_schema_path;
+        service = std::make_unique<WorkflowService>(schema_path);
     }
 
     boost::asio::io_context& ioc_ = shared_redis_ioc;
@@ -85,9 +87,9 @@ TEST_F(WorkflowServiceTest, InvalidJson) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, invalid_json);
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.status_str, "Invalid JSON format");
+    EXPECT_EQ(result.status_str, error_msgs::INVALID_JSON_FORMAT);
     EXPECT_FALSE(result.errors_msg.empty());
-    EXPECT_TRUE(result.errors_msg.find("Parse error") != std::string::npos);
+    EXPECT_TRUE(result.errors_msg.find("parse error") != std::string::npos);
 }
 
 // Test missing required fields
@@ -99,7 +101,7 @@ TEST_F(WorkflowServiceTest, MissingRequiredFields) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_EQ(result.status_str, error_msgs::SCHEMA_VALIDATION_FAILED);
     EXPECT_FALSE(result.errors_msg.empty());
 }
 
@@ -115,7 +117,7 @@ TEST_F(WorkflowServiceTest, InvalidFieldTypes) {
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_EQ(result.status_str, error_msgs::SCHEMA_VALIDATION_FAILED);
     EXPECT_FALSE(result.errors_msg.empty());
 }
 
@@ -129,9 +131,10 @@ TEST_F(WorkflowServiceTest, EmptyJobsArray) {
     workflow["jobs"] = json::array();  // Empty array
 
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    std::cout << "Returned ValidationResult: " << result.errors_msg << ", " << result.status_str << std::endl;
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_EQ(result.status_str, error_msgs::SCHEMA_VALIDATION_FAILED);
     EXPECT_FALSE(result.errors_msg.empty());
 }
 
@@ -155,9 +158,10 @@ TEST_F(WorkflowServiceTest, InvalidJobStructure) {
     workflow["jobs"] = json::array({job1, job2});
 
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    std::cout << "Returned ValidationResult: " << result.errors_msg << ", " << result.status_str << std::endl;
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_EQ(result.status_str, error_msgs::SCHEMA_VALIDATION_FAILED);
     EXPECT_FALSE(result.errors_msg.empty());
 }
 
@@ -177,9 +181,10 @@ TEST_F(WorkflowServiceTest, InvalidJobTypes) {
     workflow["jobs"] = json::array({job});
 
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    std::cout << "Returned ValidationResult: " << result.errors_msg << ", " << result.status_str << std::endl;
 
     EXPECT_FALSE(result.valid);
-    EXPECT_EQ(result.status_str, "Schema validation failed");
+    EXPECT_EQ(result.status_str, error_msgs::SCHEMA_VALIDATION_FAILED);
     EXPECT_FALSE(result.errors_msg.empty());
 }
 
@@ -199,9 +204,10 @@ TEST_F(WorkflowServiceTest, ValidMinimalWorkflow) {
     workflow["jobs"] = json::array({job});
 
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    std::cout << "Returned ValidationResult: " << result.errors_msg << ", " << result.status_str << std::endl;
 
     EXPECT_TRUE(result.valid);
-    EXPECT_EQ(result.status_str, "Workflow validation successful");
+    EXPECT_EQ(result.status_str, error_msgs::WORKFLOW_ADMITTED);
     EXPECT_TRUE(result.errors_msg.empty());
 }
 
@@ -246,9 +252,9 @@ TEST_F(WorkflowServiceTest, ValidComplexWorkflow) {
     workflow["jobs"] = json::array({job1, job2});
 
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
-
+    std::cout << "Returned ValidationResult: " << result.errors_msg << ", " << result.status_str << std::endl;
     EXPECT_TRUE(result.valid);
-    EXPECT_EQ(result.status_str, "Workflow validation successful");
+    EXPECT_EQ(result.status_str, error_msgs::WORKFLOW_ADMITTED);
     EXPECT_TRUE(result.errors_msg.empty());
 }
 
@@ -276,9 +282,9 @@ TEST_F(WorkflowServiceTest, WorkflowWithOptionalFields) {
     workflow["jobs"] = json::array({job});
 
     ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
-
+    std::cout << "Returned ValidationResult: " << result.errors_msg << ", " << result.status_str << std::endl;
     EXPECT_TRUE(result.valid);
-    EXPECT_EQ(result.status_str, "Workflow validation successful");
+    EXPECT_EQ(result.status_str, error_msgs::WORKFLOW_ADMITTED);
     EXPECT_TRUE(result.errors_msg.empty());
 }
 
@@ -291,8 +297,8 @@ TEST(RedisDatabaseTest, InvalidConnectionStringFails) {
         GTEST_SKIP() << "Redis unavailable for RedisDatabaseTest: " << ex.what();
     }
 
-    EXPECT_FALSE(run_async(shared_redis_ioc, redis->connect_async("redis://localhost")));
-    EXPECT_FALSE(run_async(shared_redis_ioc, redis->connect_async("redis://")));
+    EXPECT_FALSE(redis->connect("redis://localhost"));
+    EXPECT_FALSE(redis->connect("redis://"));
 }
 
 class ActualRedisDatabaseTest : public ::testing::Test {

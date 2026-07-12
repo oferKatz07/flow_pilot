@@ -1,16 +1,50 @@
-// client_data_manager.cpp - Implementation of ClientDataManager
-
-#include "client_data_manager.h"
-#include "sqlite_db.h"
-#include "logger.h"
+// client_sqlite_config_manager.cpp - Implementation of ClientSqliteConfigManager
 
 #include <memory>
 #include <vector>
 
+#include "logger.h"
+#include "sqlite_db.h"
+#include "client_sqlite_config_manager.h"
+
 namespace flow_pilot {
 
-ClientDataManager::ClientDataManager()
-{
+ClientSqliteConfigManager& ClientSqliteConfigManager::get_instance() {
+    static ClientSqliteConfigManager instance;
+
+    return instance;
+}
+
+bool ClientSqliteConfigManager::get_client_config(const std::string& client_id, ClientConfig& out) const {
+    auto cit = clients_.find(client_id);
+    if (cit == clients_.end()) {
+        return false;
+    }
+    out.client_id = cit->second.client_id;
+    const auto& rl_name = cit->second.rate_limit_config_plan_name;
+    const auto& pp_name = cit->second.policy_plan_name;
+
+    auto rlit = rate_limit_plans_.find(rl_name);
+    if (rlit != rate_limit_plans_.end()) {
+        out.rate_limit_config = rlit->second;
+    }
+
+    auto ppit = policy_plans_.find(pp_name);
+    if (ppit != policy_plans_.end()) {
+        out.policy_config = ppit->second;
+    }
+
+    return true;
+}
+
+void ClientSqliteConfigManager::load_from_db() {
+    auto& db = SQLiteDatabase::get_instance();
+    db.get_rate_limit_plans(rate_limit_plans_);
+    db.get_policy_plans(policy_plans_);
+    db.get_all_users(clients_);
+}
+
+ClientSqliteConfigManager::ClientSqliteConfigManager() {
     load_from_db();
     if (rate_limit_plans_.empty() || policy_plans_.empty() || clients_.empty()) {
         ensure_defaults();
@@ -19,43 +53,7 @@ ClientDataManager::ClientDataManager()
     }
 }
 
-bool get_client_config(const std::string& client_id, ClientConfig& out)
-{
-    static ClientDataManager mgr;
-    const auto& clients = mgr.clients();
-    auto cit = clients.find(client_id);
-    if (cit == clients.end()) {
-        return false;
-    }
-    out.client_id = cit->second.client_id;
-    const auto& rl_name = cit->second.rate_limit_config_plan_name;
-    const auto& pp_name = cit->second.policy_plan_name;
-
-    const auto& rmap = mgr.rate_limit_plans();
-    auto rlit = rmap.find(rl_name);
-    if (rlit != rmap.end()) {
-        out.rate_limit_config = rlit->second;
-    }
-
-    const auto& pmap = mgr.policy_plans();
-    auto ppit = pmap.find(pp_name);
-    if (ppit != pmap.end()) {
-        out.policy_config = ppit->second;
-    }
-
-    return true;
-}
-
-void ClientDataManager::load_from_db()
-{
-    auto& db = SQLiteDatabase::get_instance();
-    db.get_rate_limit_plans(rate_limit_plans_);
-    db.get_policy_plans(policy_plans_);
-    db.get_all_users(clients_);
-}
-
-void ClientDataManager::ensure_defaults()
-{
+void ClientSqliteConfigManager::ensure_defaults() {
     auto& db = SQLiteDatabase::get_instance();
 
     // Default rate limit plans

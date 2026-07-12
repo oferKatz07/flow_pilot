@@ -16,7 +16,7 @@ std::once_flag Logger::init_flag_;
 
 void Logger::initialize()
 {
-    auto& config = Config::get_config().logger();
+    auto& config = Config::get().logger();
 
     // Convert our enum to spdlog level
     spdlog::level::level_enum spd_level;

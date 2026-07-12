@@ -100,7 +100,7 @@ boost::asio::awaitable<bool> AsyncDatabase::get_all_workflows_for_client_async(
 
 IDatabase& AsyncDatabase::get_db_instance()
 {
-    if (Config::get_config().db_config().db_type == DBConfig::DBType::ASYNC_SQLITE) {
+    if (Config::get().db_config().db_type == DBConfig::DBTypes::ASYNC_SQLITE) {
         return SQLiteDatabase::get_instance();
     } else {
         throw std::runtime_error("Unsupported database type! not implemented yet");

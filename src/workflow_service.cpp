@@ -7,9 +7,9 @@
 
 #include "flow_pilot_error_msgs.h"
 #include "logger.h"
-#include "client_data.h"
+#include "client_config.h"
 #include "config.h"
-#include "client_data_manager.h"
+#include "client_config_manager_factory.h"
 #include "redis_db_async.h"
 #include "db_factory.h"
 #include "workflow_service.h"
@@ -46,8 +46,8 @@ WorkflowService::WorkflowService(const std::string& schema_path)
     RequestData workflow_request_info;
     ValidationResult result = {
         true,
-        error_msg::WORKFLOW_ADMITTED,  // "Workflow was validated and admitted"
-        std::string(error_msg::WORKFLOW_ADMITTED)  // No errors
+        error_msgs::WORKFLOW_ADMITTED,  // "Workflow was validated and admitted"
+        "" // No errors
     };
 
     if (!parse_request(body, workflow_data, workflow_request_info, result)) {
@@ -63,13 +63,13 @@ WorkflowService::WorkflowService(const std::string& schema_path)
 
     std::string rejection_reason;
     // Check if the client can accept the request based on rate limits and active workflows
-    bool res = co_await admit_request(workflow_request_info, client_config.rate_limit_config, rejection_reason);
-    if (!res) {
-        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason, false);
-    }
+    // bool res = co_await admit_request(workflow_request_info, client_config.rate_limit_config, rejection_reason);
+    // if (!res) {
+    //     co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason, false);
+    // }
 
     // Persist the request in the DB for auditing purposes
-    res = co_await persist_request(workflow_request_info, body, client_config, rejection_reason);
+    bool res = co_await persist_request(workflow_request_info, body, client_config, rejection_reason);
     if (!res) {
         co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
     }
@@ -98,7 +98,7 @@ bool WorkflowService::parse_request(const std::string& body, json& workflow_data
     }
     catch (const nlohmann::json::parse_error& e) {
         result.valid = false;
-        result.status_str = error_msg::INVALID_JSON_FORMAT;
+        result.status_str = error_msgs::INVALID_JSON_FORMAT;
         result.errors_msg = std::string("JSON parse error: ") + e.what();
 
         return false;
@@ -109,7 +109,7 @@ bool WorkflowService::parse_request(const std::string& body, json& workflow_data
     }
     catch (const std::exception& e) {
         result.valid = false;
-        result.status_str = error_msg::SCHEMA_VALIDATION_FAILED;
+        result.status_str = error_msgs::SCHEMA_VALIDATION_FAILED;
         result.errors_msg = std::string("Schema validation error: ") + e.what();
 
         return false;
@@ -126,10 +126,10 @@ bool WorkflowService::parse_request(const std::string& body, json& workflow_data
 }
 
 bool WorkflowService::get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result) {
-    if (!get_client_config(client_id, client_config)) {
+    if (!ClientConfigManagerFactory::get().get_client_config(client_id, client_config)) {
         result.valid = false;
-        result.status_str = error_msg::CLIENT_NOT_FOUND;
-        result.errors_msg = std::string(error_msg::CLIENT_NOT_FOUND);
+        result.status_str = error_msgs::CLIENT_NOT_FOUND;
+        result.errors_msg = std::string(error_msgs::CLIENT_NOT_FOUND);
         return false;
     }
     
@@ -153,7 +153,7 @@ boost::asio::awaitable<bool> WorkflowService::persist_request(const RequestData&
                                                               const std::string& body, 
                                                               const ClientConfig& client_config, 
                                                               std::string& rejection_reason) {
-    co_return co_await DBFactory::get_database().add_request_async(request_info, body, 
+    co_return co_await DBFactory::get().add_request_async(request_info, body, 
                                                                    client_config, rejection_reason);
 }
 
@@ -176,14 +176,14 @@ bool WorkflowService::validate_workflow(const json& workflow_data, const PolicyP
     // Extract the workflow info from the received data
     workflow_info.workflow_type = workflow_data.value("workflow_type", std::string());
     workflow_info.total_jobs = static_cast<int>(workflow_data["jobs"].size());
-    workflow_info.workflow_version = Config::get_config().workflow().version;
+    workflow_info.workflow_version = Config::get().workflow().version;
     to_string(WorkflowStatus::ADMITTED, workflow_info.status);
 
     return true;
 }
 
 boost::asio::awaitable<bool> WorkflowService::persist_workflow(const WorkflowfullData& workflow_info, std::string& rejection_reason) {
-    co_return co_await DBFactory::get_database().add_workflow_async(workflow_info, rejection_reason);
+    co_return co_await DBFactory::get().add_workflow_async(workflow_info, rejection_reason);
 }
 
 bool WorkflowService::validate_admission_client_workflow_policy(const json& workflow_data,  
@@ -194,14 +194,14 @@ bool WorkflowService::validate_admission_client_workflow_policy(const json& work
     if (job_count > policy_config.max_jobs_in_workflow) {
         error_msg = "Workflow has " + std::to_string(job_count) + " jobs, but the maximum allowed is " + std::to_string(policy_config.max_jobs_in_workflow);
         Logger::get_instance()->error(error_msg);
-        rejection_reason = error_msg::JOB_COUNT_EXCEEDED;
+        rejection_reason = error_msgs::JOB_COUNT_EXCEEDED;
         return false;
     }
 
     if (job_count == 0) {
         error_msg = "Workflow has no jobs";
         Logger::get_instance()->error(error_msg);
-        rejection_reason = error_msg::JOB_COUNT_ZERO;
+        rejection_reason = error_msgs::JOB_COUNT_ZERO;
         return false;
     }
 
@@ -210,7 +210,7 @@ bool WorkflowService::validate_admission_client_workflow_policy(const json& work
         if (job_size_bytes > policy_config.max_job_size_bytes) {
             error_msg = "Job '" + job["job_id"].get<std::string>() + "' size is " + std::to_string(job_size_bytes) + " bytes, but the maximum allowed is " + std::to_string(policy_config.max_job_size_bytes) + " bytes";
             Logger::get_instance()->error(error_msg);
-            rejection_reason = error_msg::JOB_SIZE_EXCEEDED;
+            rejection_reason = error_msgs::JOB_SIZE_EXCEEDED;
             return false;
         }
     }
@@ -233,7 +233,7 @@ bool WorkflowService::validate_semantic(const json& data,
             if (!res.second) {
                 error_msg = "Duplicate dependency found for job " + job_data.job_id;
                 Logger::get_instance()->error(error_msg);
-                rejection_reason = error_msg::DUPLICATE_DEPENDENCY;
+                rejection_reason = error_msgs::DUPLICATE_DEPENDENCY;
                 return false;
             }
         }
@@ -242,7 +242,7 @@ bool WorkflowService::validate_semantic(const json& data,
             // Duplicate job ID found
             error_msg = "Duplicate job ID found for job '" + job_data.job_id + "'";
             Logger::get_instance()->error(error_msg);
-            rejection_reason = error_msg::DUPLICATE_JOB_ID;
+            rejection_reason = error_msgs::DUPLICATE_JOB_ID;
             return false;
         }
 
@@ -267,7 +267,7 @@ bool WorkflowService::validate_dependencies(const json& data,
             if (jobs_map.find(dep_name) == jobs_map.end()) {
                 error_msg ="Dependency '" + dep_name + "' is not defined as a job required by job '" + job.first + "'";
                 Logger::get_instance()->error(error_msg);
-                rejection_reason = error_msg::MISSING_DEPENDENCY;
+                rejection_reason = error_msgs::MISSING_DEPENDENCY;
                 return false;
             }
 
@@ -299,14 +299,12 @@ bool WorkflowService::validate_dependencies(const json& data,
     if (job_visited_count != jobs_map.size()) {
         std::string error_msg = "Cyclic dependency detected in the workflow";
         Logger::get_instance()->error(error_msg);
-        rejection_reason = error_msg::CIRCULAR_DEPENDENCY;
+        rejection_reason = error_msgs::CIRCULAR_DEPENDENCY;
         return false;
     }
 
     return true;
 }
-
-
 
 awaitable<ValidationResult> WorkflowService::handle_request_rejection(ValidationResult& result, 
                                                                       RequestData& request_info, 
@@ -328,7 +326,7 @@ awaitable<ValidationResult> WorkflowService::handle_request_rejection(Validation
     }
 
     // Update request status in the database
-    co_await DBFactory::get_database().update_request_status_async(request_info);
+    co_await DBFactory::get().update_request_status_async(request_info);
 
     co_return result;
 }
@@ -339,12 +337,12 @@ awaitable<ValidationResult> WorkflowService::handle_request_accepted(ValidationR
     to_string(RequestStatus::COMPLETED, ok_status);
 
     request_info.status = std::move(ok_status);
-    request_info.reject_reason = error_msg::WORKFLOW_ADMITTED;
+    request_info.reject_reason = error_msgs::WORKFLOW_ADMITTED;
 
-    co_await update_redis_request_status(request_info);
+    // co_await update_redis_request_status(request_info);
 
     // Update request status in the database
-    co_await DBFactory::get_database().update_request_status_async(request_info);
+    co_await DBFactory::get().update_request_status_async(request_info);
 
     co_return result;
 }
