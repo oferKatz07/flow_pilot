@@ -1,25 +1,21 @@
 # FlowPilot
 
-A distributed workflow orchestration platform designed for reliable asynchronous task execution, dependency-aware scheduling, and extensible worker integration.
+A distributed reliable workflow orchestration platform designed for reliable asynchronous task execution, dependency-aware scheduling, and extensible worker integration.
 
-FlowPilot is a modern backend infrastructure project focused on workflow orchestration, asynchronous I/O, concurrency, and reliability. It explores real-world distributed systems concepts using modern C++20 and Boost.Asio coroutines.
+FlowPilot is a modern backend infrastructure project that explores production-grade workflow orchestration using asynchronous C++, coroutines, Redis, and SQLite.
 
+The project focuses on the engineering challenges behind reliable distributed systems rather than workflow business logic. Its architecture emphasizes idempotent request admission, dependency-aware scheduling, durable request auditing and workflow persistence, and scalable asynchronous execution.
+
+FlowPilot is being developed as a portfolio-quality system architecture project demonstrating modern C++ backend design, concurrent programming, and infrastructure engineering.
 ---
 
-# Project Goals
+# Engineering Objectives
 
-FlowPilot was created as a hands-on engineering project to explore and implement modern backend architecture concepts including:
-
-* Asynchronous networking
-* Workflow orchestration
-* DAG-based dependency scheduling
-* Distributed systems patterns
-* Idempotent APIs
-* Rate limiting
-* Redis coordination
-* Durable persistence
-* Extensible execution models - planned
-* Observability and structured logging
+* Build a reliable workflow orchestration platform using modern asynchronous C++.
+* Design an admission pipeline that guarantees idempotency, rate limiting, and durable request tracking.
+* Explore distributed systems concepts including concurrency control, dependency scheduling, and eventual scalability.
+* Demonstrate clean software architecture through dependency injection, modular components, and comprehensive unit testing.
+* Provide a production-inspired codebase suitable for experimentation with scheduling algorithms, worker pools, retries, and distributed execution.
 
 The project emphasizes clean architecture, operational semantics, and realistic infrastructure design rather than CRUD-oriented backend development.
 
@@ -221,6 +217,37 @@ These policies are loaded during initialization and applied during workflow admi
 ## Implementation Status
 
 The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, and DAG dependency validation. Current development is focused on the workflow execution engine, including job scheduling, worker dispatch, and execution lifecycle management.
+
+
+### Current Project Status
+
+✔ HTTP API
+
+✔ Workflow validation
+
+✔ JSON Schema validation
+
+✔ DAG validation
+
+✔ Client policies
+
+✔ Request idempotency
+
+✔ Redis admission control
+
+✔ SQLite persistence
+
+✔ Audit history
+
+🚧 Scheduler
+
+🚧 Worker execution
+
+🚧 Distributed workers
+
+🚧 Retry engine
+
+🚧 Compensation workflows
 
 ### Phase 1 — Workflow Admission ✅
 

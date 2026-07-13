@@ -63,14 +63,14 @@ public:
 
     bool add_request(
         const RequestData& request_data,
-        std::string& error_message
+        StatusCodes& error_status
     ) override;
 
     bool add_request(
         const RequestData& request_data,
         const std::string& workflow_payload,
         const ClientConfig& client_config,
-        std::string& error_message
+        StatusCodes& error_status
     ) override;
 
     bool update_request_status(const RequestData& request_data) override;
@@ -79,7 +79,7 @@ public:
 
     bool add_workflow(
         const WorkflowfullData& workflow_data,
-        std::string& error_message
+        StatusCodes& error_status
     ) override;
 
     bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const std::string& status) override;

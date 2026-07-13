@@ -36,7 +36,7 @@ public:
                                                              int max_active_workflows,
                                                              int max_requests,
                                                              int window_seconds,
-                                                             std::string& rejection_reason) = 0;
+                                                             StatusCodes& rejection_reason) = 0;
     virtual boost::asio::awaitable<bool> update_request_status_async(const std::string& client_id, 
                                                                      const std::string& request_id, 
                                                                      const std::string& status) = 0;
@@ -75,7 +75,7 @@ public:
                                                      int max_active_workflows,
                                                      int max_requests,
                                                      int window_seconds,
-                                                     std::string& rejection_reason) override;
+                                                     StatusCodes& rejection_reason) override;
     boost::asio::awaitable<bool> update_request_status_async(const std::string& client_id, const std::string& request_id, const std::string& status) override;
     boost::asio::awaitable<bool> fetch_request_status_async(const std::string& client_id, const std::string& request_id, std::string& value) const override;
     boost::asio::awaitable<bool> remove_active_workflow_async(const std::string& client_id, const std::string& workflow_id) override;

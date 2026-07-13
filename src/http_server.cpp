@@ -31,8 +31,7 @@ using asio::use_awaitable;
 
 static void fail(beast::error_code ec, char const* what)
 {
-    auto logger = get_logger();
-    logger->error("HTTP server error: {}: {}", what, ec.message());
+    Logger::get_logger()->error("HTTP server error: {}: {}", what, ec.message());
 }
 
 
@@ -54,7 +53,7 @@ public:
                 req_ = {};
                 co_await http::async_read(socket_, buffer_, req_, use_awaitable);
 
-                Logger::get_instance()->debug("{} {}", req_.method_string(), req_.target());
+                Logger::get_logger()->debug("{} {}", req_.method_string(), req_.target());
 
                 
                 HandlerCtxData ctx;
@@ -122,7 +121,7 @@ public:
         for (;;) {
             try {
                 tcp::socket socket = co_await acceptor_.async_accept(use_awaitable);
-                Logger::get_instance()->debug("New client connected from {}", socket.remote_endpoint().address().to_string());
+                Logger::get_logger()->debug("New client connected from {}", socket.remote_endpoint().address().to_string());
                 co_spawn(acceptor_.get_executor(), 
                          session(std::move(socket)).run(),
                          detached);
@@ -137,7 +136,7 @@ public:
 
 void run_http_server(asio::io_context& ioc)
 {
-    Logger::get_instance()->info("Initializing FlowPilot HTTP server");
+    Logger::get_logger()->info("Initializing FlowPilot HTTP server");
     const ServerConfig& config = Config::get().server();
     auto const address = asio::ip::make_address(config.address);
     tcp::endpoint endpoint{address, config.port};
@@ -145,7 +144,7 @@ void run_http_server(asio::io_context& ioc)
     co_spawn(ioc, 
              listener_ptr->run(),
              detached);
-    Logger::get_instance()->info("HTTP server listening on {}:{}", config.address, config.port);
+    Logger::get_logger()->info("HTTP server listening on {}:{}", config.address, config.port);
 }
 
 } // namespace flow_pilot

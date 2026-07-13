@@ -7,6 +7,7 @@
 #include <unordered_map>
 
 #include "client_config.h"
+#include "flow_pilot_error_msgs.h"
 
 namespace flow_pilot {
 
@@ -19,7 +20,7 @@ enum class ClientStatus {
 };
 
 // Conversion functions for ClientStatus
-inline bool to_string(ClientStatus status, std::string& str) {
+inline bool to_string(ClientStatus status, std::string_view& str) {
     switch(status) {
         case ClientStatus::ACTIVE: str = "ACTIVE"; return true;
         case ClientStatus::SUSPENDED: str = "SUSPENDED"; return true;
@@ -46,7 +47,7 @@ enum class RequestStatus {
     COMPLETED,
 };
 
-inline bool to_string(RequestStatus status, std::string& str) {
+inline bool to_string(RequestStatus status, std::string_view& str) {
     switch(status) {
         case RequestStatus::RECEIVED: str = "RECEIVED"; return true;
         case RequestStatus::REJECTED: str = "REJECTED"; return true;
@@ -81,7 +82,7 @@ enum class WorkflowStatus {
 };
 
 // Conversion functions for WorkflowStatus
-inline bool to_string(WorkflowStatus status, std::string& str) {
+inline bool to_string(WorkflowStatus status, std::string_view& str) {
     switch(status) {
         case WorkflowStatus::ADMITTED: str = "ADMITTED"; return true;
         case WorkflowStatus::RUNNING: str = "RUNNING"; return true;
@@ -90,6 +91,19 @@ inline bool to_string(WorkflowStatus status, std::string& str) {
         case WorkflowStatus::CANCELED: str = "CANCELED"; return true;
         default: return false;
     }
+}
+
+inline std::string_view to_string(WorkflowStatus status) {
+    switch(status) {
+        case WorkflowStatus::ADMITTED: return "ADMITTED";
+        case WorkflowStatus::RUNNING: return "RUNNING";
+        case WorkflowStatus::COMPLETED: return "COMPLETED";
+        case WorkflowStatus::FAILED: return "FAILED";
+        case WorkflowStatus::CANCELED: return "CANCELED";
+        default: return "";
+    }
+
+    return "";
 }
 
 inline bool workflow_status_from_string(const std::string& str, WorkflowStatus& workflow_status) {
@@ -125,7 +139,7 @@ enum class JobStatus {
 };
 
 // Conversion functions for JobStatus
-inline bool to_string(JobStatus status, std::string& str) {
+inline bool to_string(JobStatus status, std::string_view& str) {
     switch(status) {
         case JobStatus::PENDING: str = "PENDING"; return true;
         case JobStatus::RUNNING: str = "RUNNING"; return true;
@@ -236,7 +250,7 @@ public:
     // Add a new received rejected request
     virtual bool add_request(
         const RequestData& request_data,
-        std::string& error_message
+        StatusCodes& error_status
     ) = 0;
 
     /// Get all workflows for the requested client from the DB. This is used for auditing and debugging purposes.
@@ -247,7 +261,7 @@ public:
         const RequestData& request_data,
         const std::string& workflow_payload,
         const ClientConfig& client_config,
-        std::string& error_message
+        StatusCodes& error_status
     ) = 0;
 
     // Update the request status in the DB. This is used for durability and auditing of request processing.
@@ -256,7 +270,7 @@ public:
     // Add a new workflow data to the DB. This is used for durability and auditing of workflow submissions.
     virtual bool add_workflow(
         const WorkflowfullData& workflow_data,
-        std::string& error_message
+        StatusCodes& error_status
     ) = 0;
 
     // Update the workflow status in the DB. This is used for durability and auditing of workflow execution.

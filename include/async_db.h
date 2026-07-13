@@ -25,13 +25,13 @@ public:
 
     boost::asio::awaitable<bool> add_request_async(
         const RequestData& request_data,
-        std::string& error_message) override;
+        StatusCodes& error_status) override;
 
     boost::asio::awaitable<bool> add_request_async(
         const RequestData& request_data,
         const std::string& workflow_payload,
         const ClientConfig& client_config,
-        std::string& error_message) override;
+        StatusCodes& error_status) override;
 
     boost::asio::awaitable<bool> update_request_status_async(
        const RequestData& request_data) override;
@@ -42,7 +42,7 @@ public:
 
     boost::asio::awaitable<bool> add_workflow_async(
         const WorkflowfullData& workflow_data,
-        std::string& error_message) override;
+        StatusCodes& error_status) override;
 
     boost::asio::awaitable<bool> update_workflow_status_async(
         const std::string& client_id,

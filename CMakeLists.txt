@@ -48,6 +48,7 @@ set(FLOW_PILOT_SOURCES
     src/db_factory.cpp
     src/async_db.cpp
     src/client_sqlite_config_manager.cpp
+    src/client_test_config_manager.cpp
     src/client_config_manager_factory.cpp
     src/request_handlers.cpp
     src/http_server.cpp

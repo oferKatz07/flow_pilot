@@ -4,8 +4,11 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 
-namespace flow_pilot::error_msgs {
+namespace flow_pilot {
+
+namespace error_msgs {
 
 // Validation Errors dtrings:
 inline constexpr std::string_view  INVALID_JSON_FORMAT = "Invalid JSON format";
@@ -27,4 +30,73 @@ inline constexpr std::string_view  RATE_LIMIT_EXCEEDED = "Rate limit exceeded";
 inline constexpr std::string_view  CONCURRENT_WORKFLOW_LIMIT_EXCEEDED = "Concurrent workflow limit exceeded";
 inline constexpr std::string_view  WORKFLOW_ADMITTED = "Workflow was validated and admitted";
 
-} // namespace flow_pilot::error_msg
+} // namespace error_msg
+
+enum class StatusCodes {
+    INVALID_JSON_FORMAT,
+    SCHEMA_VALIDATION_FAILED,
+    CLIENT_NOT_FOUND,
+    WORKFLOW_SIZE_EXCEEDED,
+    JOB_COUNT_EXCEEDED,
+    JOB_COUNT_ZERO,
+    JOB_SIZE_EXCEEDED,
+    MISSING_DEPENDENCY,
+    DUPLICATE_DEPENDENCY,
+    DUPLICATE_JOB_ID,
+    CIRCULAR_DEPENDENCY,
+    CLIENT_POLICY_VIOLATION,
+    INTERNAL_DB_FAILURE,
+    DUPLICATE_REQUEST,
+    WORKFLOW_ID_EXISTS,
+    RATE_LIMIT_EXCEEDED,
+    CONCURRENT_WORKFLOW_LIMIT_EXCEEDED,
+    WORKFLOW_ADMITTED
+};
+
+inline std::string_view status_code_to_string(StatusCodes status_code) {
+    switch (status_code) {
+        case StatusCodes::INVALID_JSON_FORMAT:
+            return std::string(error_msgs::INVALID_JSON_FORMAT);
+        case StatusCodes::SCHEMA_VALIDATION_FAILED:
+            return std::string(error_msgs::SCHEMA_VALIDATION_FAILED);
+        case StatusCodes::CLIENT_NOT_FOUND:
+            return std::string(error_msgs::CLIENT_NOT_FOUND);
+        case StatusCodes::WORKFLOW_SIZE_EXCEEDED:
+            return std::string(error_msgs::WORKFLOW_SIZE_EXCEEDED);
+        case StatusCodes::JOB_COUNT_EXCEEDED:
+            return std::string(error_msgs::JOB_COUNT_EXCEEDED);
+        case StatusCodes::JOB_COUNT_ZERO:
+            return std::string(error_msgs::JOB_COUNT_ZERO);
+        case StatusCodes::JOB_SIZE_EXCEEDED:
+            return std::string(error_msgs::JOB_SIZE_EXCEEDED);
+        case StatusCodes::MISSING_DEPENDENCY:
+            return std::string(error_msgs::MISSING_DEPENDENCY);
+        case StatusCodes::DUPLICATE_DEPENDENCY:
+            return std::string(error_msgs::DUPLICATE_DEPENDENCY);
+        case StatusCodes::DUPLICATE_JOB_ID:
+            return std::string(error_msgs::DUPLICATE_JOB_ID);
+        case StatusCodes::CIRCULAR_DEPENDENCY:
+            return std::string(error_msgs::CIRCULAR_DEPENDENCY);
+        case StatusCodes::CLIENT_POLICY_VIOLATION:
+            return std::string(error_msgs::CLIENT_POLICY_VIOLATION);
+        case StatusCodes::INTERNAL_DB_FAILURE:
+            return std::string(error_msgs::INTERNAL_DB_FAILURE);
+        case StatusCodes::DUPLICATE_REQUEST:
+            return std::string(error_msgs::DUPLICATE_REQUEST);
+        case StatusCodes::WORKFLOW_ID_EXISTS:
+            return std::string(error_msgs::WORKFLOW_ID_EXISTS);
+        case StatusCodes::RATE_LIMIT_EXCEEDED:
+            return std::string(error_msgs::RATE_LIMIT_EXCEEDED);
+        case StatusCodes::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED:
+            return std::string(error_msgs::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED);
+        case StatusCodes::WORKFLOW_ADMITTED:
+            return std::string(error_msgs::WORKFLOW_ADMITTED);
+        default:
+            return "Unknown status code";
+    }
+    
+    // Code should not reach this point
+    return "";
+}
+
+} // namespace flow_pilot

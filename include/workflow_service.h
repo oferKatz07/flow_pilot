@@ -13,6 +13,7 @@
 #include <boost/asio.hpp>
 
 #include "db_interface.h"
+#include "flow_pilot_error_msgs.h"
 
 namespace flow_pilot {
 
@@ -22,7 +23,7 @@ class PolicyPlan;
 
 struct ValidationResult {
     bool valid;
-    std::string_view status_str;
+    StatusCodes status_code;
     std::string errors_msg;
 };
 
@@ -45,25 +46,25 @@ public:
     bool get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result);
     boost::asio::awaitable<bool> admit_request(const RequestData& request_info, 
                                                const RateLimitConfig& rate_limit_config, 
-                                               std::string& rejection_reason);
+                                               StatusCodes& rejection_reason);
     boost::asio::awaitable<bool> persist_request(const RequestData& request_info, const std::string& body, 
-                                                 const ClientConfig& client_config, std::string& rejection_reason);
+                                                 const ClientConfig& client_config, StatusCodes& rejection_reason);
     bool validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
                            std::unordered_map<std::string, DagData>& jobs_map, WorkflowfullData& workflow_info, 
-                           std::string& rejection_reason);
-     boost::asio::awaitable<bool>  persist_workflow(const WorkflowfullData& workflow_info, std::string& rejection_reason);
+                           StatusCodes& rejection_reason);
+     boost::asio::awaitable<bool>  persist_workflow(const WorkflowfullData& workflow_info, StatusCodes& rejection_reason);
     bool validate_admission_client_workflow_policy(const json& workflow_data, 
                                                    const PolicyPlan& policy_config, 
-                                                   std::string& rejection_reason);
+                                                   StatusCodes& rejection_reason);
     bool validate_semantic(const json& data, 
                            std::unordered_map<std::string, DagData>& jobs_map, 
-                           std::string& rejection_reason);
+                           StatusCodes& rejection_reason);
     bool validate_dependencies(const json& data, 
                                std::unordered_map<std::string, DagData>& jobs_map, 
-                               std::string& rejection_reason);
+                               StatusCodes& rejection_reason);
     boost::asio::awaitable<ValidationResult> handle_request_rejection(ValidationResult& result, 
                                                                       RequestData& request_info, 
-                                                                      const std::string& rejection_reason,
+                                                                      const StatusCodes& rejection_reason,
                                                                       bool update_redis = false);
     boost::asio::awaitable<ValidationResult> handle_request_accepted(ValidationResult& result, 
                                                                      RequestData& request_info);

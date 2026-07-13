@@ -63,8 +63,9 @@ static http::response<http::string_body> make_header_only_response(
 
 static std::string build_validation_error_response(const ValidationResult& result){
     json response;
+    
     response["status"] = "validation_failed";
-    response["message"] = result.status_str;
+    response["message"] = status_code_to_string(result.status_code);
     response["errors"].push_back(result.errors_msg);
     return response.dump();
 }
@@ -84,21 +85,22 @@ WorkflowValidationHandler::WorkflowValidationHandler()
 // Handler for POST /api/v1/workflows - validate and submit workflow
 awaitable<http::response<http::string_body>>
 WorkflowValidationHandler::handle(const HandlerCtxData& ctx) {
-    Logger::get_instance()->info("Creating new workflow");
+    Logger::get_logger()->info("Creating new workflow");
     ValidationResult validation = co_await workflow_service_.submit_workflow(ctx.request_body);
     if (!validation.valid) {
-        get_logger()->warn("Workflow validation failed: {}", validation.status_str);
-        if (validation.status_str == "Client not found") {
+        Logger::get_logger()->warn("Workflow validation failed: {}", 
+                                   status_code_to_string(validation.status_code));
+        if (validation.status_code == StatusCodes::CLIENT_NOT_FOUND) {
             co_return make_json_response(http::status::forbidden, ctx.keep_alive,
                 build_validation_error_response(validation));
-        } else if (validation.status_str == "Duplicate request") {
+        } else if (validation.status_code == StatusCodes::DUPLICATE_REQUEST) {
             co_return make_json_response(http::status::conflict, ctx.keep_alive,
                 build_validation_error_response(validation));
-        } else if (validation.status_str == "Concurrent workflow limit exceeded" ||
-                   validation.status_str == "Rate limit exceeded") {
+        } else if (validation.status_code == StatusCodes::RATE_LIMIT_EXCEEDED ||
+                   validation.status_code == StatusCodes::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED) {
             co_return make_json_response(http::status::too_many_requests, ctx.keep_alive,
                 build_validation_error_response(validation));
-        } else if (validation.status_str == "Internal DB failure") {
+        } else if (validation.status_code == StatusCodes::INTERNAL_DB_FAILURE) {
             co_return make_json_response(http::status::internal_server_error, ctx.keep_alive,
                 build_validation_error_response(validation));
         }
@@ -107,13 +109,13 @@ WorkflowValidationHandler::handle(const HandlerCtxData& ctx) {
     }
 
     co_return make_json_response(http::status::accepted, ctx.keep_alive,
-        build_validation_success_response(validation.status_str));
+        build_validation_success_response(error_msgs::WORKFLOW_ADMITTED));
 }
 
 // Handler for GET /api/v1/workflows
 awaitable<http::response<http::string_body>>
 GetWorkflowListHandler::handle(const HandlerCtxData& ctx) {
-    Logger::get_instance()->info("List workflows requested - Returning feature not implemented response");
+    Logger::get_logger()->info("List workflows requested - Returning feature not implemented response");
     // return make_json_response(http::status::not_implemented, keep_alive,
     //     "{\"workflows\":[],\"message\":\"workflow list handler not implemented\"}");
 
@@ -123,7 +125,7 @@ GetWorkflowListHandler::handle(const HandlerCtxData& ctx) {
 // Handler for GET /api/v1/workflows/{workflow_id}
 awaitable<http::response<http::string_body>>
 GetWorkflowHandler::handle(const HandlerCtxData& ctx) {
-    Logger::get_instance()->info("Getting workflow: {} - Returning feature not implemented response", ctx.workflow_id);
+    Logger::get_logger()->info("Getting workflow: {} - Returning feature not implemented response", ctx.workflow_id);
     // json response;
     // response["workflow_id"] = workflow_id_;
     // response["status"] = "unknown";
@@ -136,7 +138,7 @@ GetWorkflowHandler::handle(const HandlerCtxData& ctx) {
 // Handler for DELETE /api/v1/workflows/{workflow_id}
 awaitable<http::response<http::string_body>>
 DeleteWorkflowHandler::handle(const HandlerCtxData& ctx) {
-    Logger::get_instance()->info("Deleting workflow: {} - Returning feature not implemented response", ctx.workflow_id);
+    Logger::get_logger()->info("Deleting workflow: {} - Returning feature not implemented response", ctx.workflow_id);
     // json response;
     // response["workflow_id"] = workflow_id;
     // response["status"] = "deleted";
@@ -149,7 +151,7 @@ DeleteWorkflowHandler::handle(const HandlerCtxData& ctx) {
 // Handler for POST /api/v1/workflows/{workflow_id}/cancel
 awaitable<http::response<http::string_body>>
 CancelWorkflowHandler::handle(const HandlerCtxData& ctx) {
-    Logger::get_instance()->info("Canceling workflow: {} - Returning feature not implemented response", ctx.workflow_id);
+    Logger::get_logger()->info("Canceling workflow: {} - Returning feature not implemented response", ctx.workflow_id);
     // json response;
     // response["workflow_id"] = workflow_id;
     // response["status"] = "cancel_requested";

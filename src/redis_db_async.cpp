@@ -270,15 +270,13 @@ bool RedisDatabaseAsync::connect(const std::string& connection_string, const std
     std::string error_message;
     bool connected = impl_async_->connect(host, port, error_message);
     if (!connected) {
-        auto logger = get_logger();
-        logger->error("Redis connection failed: {}", error_message);
+        Logger::get_logger()->error("Redis connection failed: {}", error_message);
         return false;
     }
     // TBD Authentication is deffered to a later phase.
     // The password is currently empty and we want to allow connecting without authentication first.
     // if (!impl_async_->authenticate(auth_password, error_message)) {
-    //     auto logger = get_logger();
-    //     logger->error("Redis authentication failed: {}", error_message);
+    //     Logger::get_logger()->error("Redis authentication failed: {}", error_message);
     //     return false;
     // }
 
@@ -307,11 +305,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::execute_integer_command_async(c
             }
         }
     } catch (const RedisParseException& ex) {
-        auto logger = get_logger();
-        logger->error("Redis command parse error: {}", ex.what());
+        Logger::get_logger()->error("Redis command parse error: {}", ex.what());
     } catch (const std::exception& ex) {
-        auto logger = get_logger();
-        logger->error("Redis integer command failed: {}", ex.what());
+        Logger::get_logger()->error("Redis integer command failed: {}", ex.what());
     }
     co_return false;
 }
@@ -394,7 +390,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
                                                                      int max_active_workflows,
                                                                      int max_requests,
                                                                      int window_seconds,
-                                                                     std::string& rejection_reason)
+                                                                     StatusCodes& rejection_reason)
 {
     std::string request_key = "fp:req:" + client_id + ":" + request_id;
     std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
@@ -475,7 +471,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     std::vector<std::string> lua_values;
     auto lua_ok = co_await execute_lua_script_async(lua_script, keys, script_args, lua_values);
     if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
-        rejection_reason = error_msgs::INTERNAL_DB_FAILURE;
+        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
         co_return false;
     }
 
@@ -486,16 +482,16 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     }
 
     if (detail == "duplicate") {
-        rejection_reason = error_msgs::DUPLICATE_REQUEST;
+        rejection_reason = StatusCodes::DUPLICATE_REQUEST;
     } else if (detail == "rate_limit") {
-        rejection_reason = error_msgs::RATE_LIMIT_EXCEEDED;
+        rejection_reason = StatusCodes::RATE_LIMIT_EXCEEDED;
     } else if (detail == "active_limit") {
-        rejection_reason = error_msgs::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
+        rejection_reason = StatusCodes::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
     } else if (detail == "duplicate_workflow") {
-        rejection_reason = error_msgs::WORKFLOW_ID_EXISTS;
+        rejection_reason = StatusCodes::WORKFLOW_ID_EXISTS;
     } else {
-        Logger::get_instance()->error("Unexpected Lua script failure: {}", detail);
-        rejection_reason = error_msgs::INTERNAL_DB_FAILURE;
+        Logger::get_logger()->error("Unexpected Lua script failure: {}", detail);
+        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
     }
     co_return false;
 }
@@ -541,11 +537,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::execute_bulk_string_command_asy
         }
         co_return false;
     } catch (const RedisParseException& ex) {
-        auto logger = get_logger();
-        logger->error("Redis command parse error: {}", ex.what());
+        Logger::get_logger()->error("Redis command parse error: {}", ex.what());
     } catch (const std::exception& ex) {
-        auto logger = get_logger();
-        logger->error("Redis bulk string command failed: {}", ex.what());
+        Logger::get_logger()->error("Redis bulk string command failed: {}", ex.what());
     }
     co_return false;
 }
@@ -569,11 +563,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::execute_lua_script_async(const 
             co_return true;
         }
     } catch (const RedisParseException& ex) {
-        auto logger = get_logger();
-        logger->error("Redis Lua script parse error: {}", ex.what());
+        Logger::get_logger()->error("Redis Lua script parse error: {}", ex.what());
     } catch (const std::exception& ex) {
-        auto logger = get_logger();
-        logger->error("Redis Lua script failed: {}", ex.what());
+        Logger::get_logger()->error("Redis Lua script failed: {}", ex.what());
     }
     values.clear();
     co_return false;
@@ -599,11 +591,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::execute_set_command_async(const
         }
         co_return false;
     } catch (const RedisParseException& ex) {
-        auto logger = get_logger();
-        logger->error("Redis SET command parse error: {}", ex.what());
+        Logger::get_logger()->error("Redis SET command parse error: {}", ex.what());
     } catch (const std::exception& ex) {
-        auto logger = get_logger();
-        logger->error("Redis SET command failed: {}", ex.what());
+        Logger::get_logger()->error("Redis SET command failed: {}", ex.what());
     }
     co_return false;
 }
@@ -619,11 +609,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::execute_mget_command_async(cons
             co_return true;
         }
     } catch (const RedisParseException& ex) {
-        auto logger = get_logger();
-        logger->error("Redis command parse error: {}", ex.what());
+        Logger::get_logger()->error("Redis command parse error: {}", ex.what());
     } catch (const std::exception& ex) {
-        auto logger = get_logger();
-        logger->error("Redis MGET command failed: {}", ex.what());
+        Logger::get_logger()->error("Redis MGET command failed: {}", ex.what());
     }
     values.clear();
     co_return false;

@@ -27,22 +27,22 @@ AsyncDatabase::AsyncDatabase() : db_(get_db_instance())
 
 boost::asio::awaitable<bool> AsyncDatabase::add_request_async(
     const RequestData& request_data,
-    std::string& error_message)
+    StatusCodes& error_code)
 {
     auto executor = pool_.get_executor();
     co_await boost::asio::post(executor, boost::asio::use_awaitable);
-    co_return db_.add_request(request_data, error_message);
+    co_return db_.add_request(request_data, error_code);
 }
 
 boost::asio::awaitable<bool> AsyncDatabase::add_request_async(
     const RequestData& request_data,
     const std::string& workflow_payload,
     const ClientConfig& client_config,
-    std::string& error_message)
+    StatusCodes& error_code)
 {
     auto executor = pool_.get_executor();
     co_await boost::asio::post(executor, boost::asio::use_awaitable);
-    co_return db_.add_request(request_data, workflow_payload, client_config, error_message);
+    co_return db_.add_request(request_data, workflow_payload, client_config, error_code);
 }
 
 boost::asio::awaitable<bool> AsyncDatabase::update_request_status_async(
@@ -64,11 +64,11 @@ boost::asio::awaitable<bool> AsyncDatabase::get_all_requests_for_client_async(
 
 boost::asio::awaitable<bool> AsyncDatabase::add_workflow_async(
     const WorkflowfullData& workflow_data,
-    std::string& error_message)
+    StatusCodes& error_code)
 {
     auto executor = pool_.get_executor();
     co_await boost::asio::post(executor, boost::asio::use_awaitable);
-    co_return db_.add_workflow(workflow_data, error_message);
+    co_return db_.add_workflow(workflow_data, error_code);
 }
 
 boost::asio::awaitable<bool> AsyncDatabase::update_workflow_status_async(

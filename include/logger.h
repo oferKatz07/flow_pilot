@@ -13,7 +13,7 @@ class Logger {
 public:
     static void init();
 
-    static inline std::shared_ptr<spdlog::logger> get_instance()
+    static inline std::shared_ptr<spdlog::logger> get_logger()
     {
         init();
         return logger_;
@@ -29,11 +29,6 @@ private:
 inline void init_logger()
 {
     Logger::init();
-}
-
-inline std::shared_ptr<spdlog::logger> get_logger()
-{
-    return Logger::get_instance();
 }
 
 } // namespace flow_pilot

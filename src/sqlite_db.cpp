@@ -42,7 +42,7 @@ bool SQLiteDatabase::get_rate_limit_plans(std::unordered_map<std::string, RateLi
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -66,7 +66,7 @@ bool SQLiteDatabase::get_rate_limit_plan(RateLimitConfig& rate_limit_plan) const
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) {
             sqlite3_finalize(stmt);
         }
@@ -80,7 +80,7 @@ bool SQLiteDatabase::get_rate_limit_plan(RateLimitConfig& rate_limit_plan) const
         rate_limit_plan.max_requests = sqlite3_column_int(stmt, 1);
         rate_limit_plan.window_sec = sqlite3_column_int(stmt, 2);
     } else {
-        get_logger()->error("Failed to fined rate limit plan '{}' in DB", rate_limit_plan.plan_name);
+        Logger::get_logger()->error("Failed to fined rate limit plan '{}' in DB", rate_limit_plan.plan_name);
         ret_val = false;
     }   
 
@@ -96,7 +96,7 @@ bool SQLiteDatabase::upsert_rate_limit_plan(const RateLimitConfig& rate_limit_pl
     
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) {
             sqlite3_finalize(stmt);
         }
@@ -111,7 +111,7 @@ bool SQLiteDatabase::upsert_rate_limit_plan(const RateLimitConfig& rate_limit_pl
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
         ret_val = false;
     }
 
@@ -127,7 +127,7 @@ bool SQLiteDatabase::get_policy_plans(std::unordered_map<std::string, PolicyPlan
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -164,7 +164,7 @@ bool SQLiteDatabase::get_policy_plan(PolicyPlan& plan_policy) const {
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -184,7 +184,7 @@ bool SQLiteDatabase::get_policy_plan(PolicyPlan& plan_policy) const {
         plan_policy.request_retention_days = sqlite3_column_int(stmt, 11);
         plan_policy.payload_retention_days = sqlite3_column_int(stmt, 12);
     } else {
-        get_logger()->error("Failed to find policy plan '{}' in DB", plan_policy.plan_name);
+        Logger::get_logger()->error("Failed to find policy plan '{}' in DB", plan_policy.plan_name);
         ret_val = false;
     }
 
@@ -202,7 +202,7 @@ bool SQLiteDatabase::upsert_policy_plan(const PolicyPlan& policy_plan) {
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) {
             sqlite3_finalize(stmt);
         }
@@ -227,7 +227,7 @@ bool SQLiteDatabase::upsert_policy_plan(const PolicyPlan& policy_plan) {
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
         ret_val = false;
     }
     sqlite3_finalize(stmt);
@@ -243,7 +243,7 @@ bool SQLiteDatabase::get_all_users(
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -274,7 +274,7 @@ bool SQLiteDatabase::upsert_user_config(
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -287,7 +287,7 @@ bool SQLiteDatabase::upsert_user_config(
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
         ret_val = false;
     }
 
@@ -302,7 +302,7 @@ bool SQLiteDatabase::get_user_config(ClientData& user_data) const {
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -315,7 +315,7 @@ bool SQLiteDatabase::get_user_config(ClientData& user_data) const {
         user_data.rate_limit_config_plan_name = rl ? reinterpret_cast<const char*>(rl) : std::string();
         user_data.policy_plan_name = pp ? reinterpret_cast<const char*>(pp) : std::string();
     } else {
-        get_logger()->error("Failed to find client_id '{}' in DB", user_data.client_id);
+        Logger::get_logger()->error("Failed to find client_id '{}' in DB", user_data.client_id);
         ret_val = false;
     }
     
@@ -324,7 +324,7 @@ bool SQLiteDatabase::get_user_config(ClientData& user_data) const {
 }
 
 
-bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& error_message) {                                 
+bool SQLiteDatabase::add_request(const RequestData& request_data, StatusCodes& error_status) {                                 
     const sqlite3_int64 now = static_cast<sqlite3_int64>(std::time(nullptr));
     const char* sql = "INSERT INTO workflow_requests (client_id, request_id, workflow_id, payload_size, operation_type, \
                                                       status, reject_reason, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
@@ -335,9 +335,9 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         msg = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
-        get_logger()->error(msg);
+        Logger::get_logger()->error(msg);
         if (stmt) sqlite3_finalize(stmt);
-        error_message = error_msgs::INTERNAL_DB_FAILURE;
+        error_status = StatusCodes::INTERNAL_DB_FAILURE;
         return false;
     }
 
@@ -354,12 +354,12 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
     if (rc != SQLITE_DONE) {
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: request id=") + request_data.request_id + " client_id=" + request_data.client_id;
-            error_message = error_msgs::DUPLICATE_REQUEST;
+            error_status = StatusCodes::DUPLICATE_REQUEST;
         } else {
             msg = std::string("Failed to insert request: ") + sqlite3_errmsg(db_);
-            error_message = error_msgs::INTERNAL_DB_FAILURE;
+            error_status = StatusCodes::INTERNAL_DB_FAILURE;
         }
-        get_logger()->error(msg);
+        Logger::get_logger()->error(msg);
         ret_val = false;
     }
 
@@ -370,30 +370,30 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, std::string& e
 bool SQLiteDatabase::add_request(const RequestData& request_data,
                                   const std::string& workflow_payload,
                                   const ClientConfig& client_config,
-                                  std::string& error_message) {
+                                  StatusCodes& error_status) {
     // Add the request to the database
-    if (!add_request(request_data, error_message)) {
+    if (!add_request(request_data, error_status)) {
         return false;
     }
 
     int concurrent_workflows;
     if (!get_client_active_workflows_count(request_data.client_id, concurrent_workflows)) {
-        error_message = error_msgs::INTERNAL_DB_FAILURE;
+        error_status = StatusCodes::INTERNAL_DB_FAILURE;
         return false;
     }
 
     if (concurrent_workflows >= client_config.rate_limit_config.max_concurrent_workflows) {
-        error_message = error_msgs::RATE_LIMIT_EXCEEDED;
+        error_status = StatusCodes::RATE_LIMIT_EXCEEDED;
         return false;
     }
 
     if (request_data.workflow_payload_size_bytes > client_config.policy_config.max_workflow_size_kb * 1024) {
-        error_message = error_msgs::WORKFLOW_SIZE_EXCEEDED;
+        error_status = StatusCodes::WORKFLOW_SIZE_EXCEEDED;
         return false;
     }
 
     if (!add_request_payload(request_data, workflow_payload)) {
-        Logger::get_instance()->error("Failed to add workflow payload for request_id={} client_id={}", request_data.request_id, request_data.client_id);
+        Logger::Logger::get_logger()->error("Failed to add workflow payload for request_id={} client_id={}", request_data.request_id, request_data.client_id);
     }
 
     return true;
@@ -405,7 +405,7 @@ bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -416,7 +416,7 @@ bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
     sqlite3_bind_text(stmt, 4, request_data.request_id.c_str(), -1, SQLITE_TRANSIENT);
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
         sqlite3_finalize(stmt);
         return false;
     }
@@ -432,7 +432,7 @@ bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, s
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -459,7 +459,7 @@ bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, s
     return true;
 }
 bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
-                                  std::string& error_message) {
+                                  StatusCodes& error_status) {
     const char* sql = "INSERT INTO workflows (client_id, workflow_id, workflow_type, version, status, total_jobs, \
                                               jobs_running, jobs_completed, received_at, updated_at, \
                                               last_state_change_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
@@ -469,8 +469,9 @@ bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        error_message = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
-        get_logger()->error(error_message);
+        std::string error_message = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
+        Logger::get_logger()->error(error_message);
+        error_status = StatusCodes::INTERNAL_DB_FAILURE;
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -494,12 +495,12 @@ bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
         std::string msg;
         if (rc == SQLITE_CONSTRAINT) {
             msg = std::string("Duplicate request: workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id;
-            error_message = error_msgs::DUPLICATE_REQUEST;
+            error_status = StatusCodes::DUPLICATE_REQUEST;
         } else {
             msg = std::string("Failed to insert workflow (workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id + "): " + sqlite3_errmsg(db_);
-            error_message = error_msgs::INTERNAL_DB_FAILURE;
+            error_status = StatusCodes::INTERNAL_DB_FAILURE;
         }
-        get_logger()->error(msg);
+        Logger::get_logger()->error(msg);
         ret_val = false;
     }
 
@@ -513,7 +514,7 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -523,7 +524,7 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
     sqlite3_bind_text(stmt, 4, workflow_id.c_str(), -1, SQLITE_TRANSIENT);
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
         sqlite3_finalize(stmt);
         return false;
     }
@@ -532,20 +533,22 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
 }
 
 bool SQLiteDatabase::get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const {
-    std::string admitted_status;
-    std::string running_status;
-    to_string(WorkflowStatus::ADMITTED, admitted_status);
-    to_string(WorkflowStatus::RUNNING, running_status);
+    std::string_view admitted_status_view;
+    std::string_view running_status_view;
+    to_string(WorkflowStatus::ADMITTED, admitted_status_view);
+    to_string(WorkflowStatus::RUNNING, running_status_view);
     const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status FROM workflows WHERE status IN (?, ?);";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
 
+    std::string admitted_status(admitted_status_view);
     sqlite3_bind_text(stmt, 1, admitted_status.c_str(), -1, SQLITE_TRANSIENT);
+    std::string running_status(running_status_view);
     sqlite3_bind_text(stmt, 2, running_status.c_str(), -1, SQLITE_TRANSIENT);
 
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -571,7 +574,7 @@ bool SQLiteDatabase::get_all_workflows_for_client(const std::string& client_id, 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -614,7 +617,7 @@ bool SQLiteDatabase::add_request_payload(const RequestData& request_data, const 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
         std::string error_message = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
-        get_logger()->error(error_message);
+        Logger::get_logger()->error(error_message);
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
@@ -625,7 +628,7 @@ bool SQLiteDatabase::add_request_payload(const RequestData& request_data, const 
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         std::string error_message = std::string("Failed to execute SQLite statement: ") + sqlite3_errmsg(db_);
-        get_logger()->error(error_message);
+        Logger::get_logger()->error(error_message);
         ret_val = false;
     }
 
@@ -648,7 +651,7 @@ bool SQLiteDatabase::get_client_active_workflows_count(const std::string& client
 
         sqlite3_finalize(stmt);
     } else {
-        Logger::get_instance()->error(sqlite3_errmsg(db_));
+        Logger::Logger::get_logger()->error(sqlite3_errmsg(db_));
         ret_val = false;
     }
 

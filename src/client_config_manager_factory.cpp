@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include "client_sqlite_config_manager.h"
+#include "client_test_config_manager.h"
 #include "client_config_manager_factory.h"
 
 namespace flow_pilot {
@@ -18,7 +19,7 @@ IClientConfigManager& ClientConfigManagerFactory::create_client_config_manager()
         case ClientDataConfig::ConfigManagerTypes::SQLITE_MANAGER:
             return ClientSqliteConfigManager::get_instance();
         case ClientDataConfig::ConfigManagerTypes::TEST_MANAGER:
-            throw std::runtime_error("Test manager not implemented");
+            return ClientTestConfigManager::get_instance();
         default:
             throw std::runtime_error("Unsupported client config manager type");
     }

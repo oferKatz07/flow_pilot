@@ -44,19 +44,19 @@ int main(int argc, char* argv[])
             }
         }
 
-        flow_pilot::get_logger()->info("Starting FlowPilot on port {}", server_config.port);
-        flow_pilot::get_logger()->info("Redis endpoint {}:{}", redis_config.host, redis_config.port);
+        flow_pilot::Logger::get_logger()->info("Starting FlowPilot on port {}", server_config.port);
+        flow_pilot::Logger::get_logger()->info("Redis endpoint {}:{}", redis_config.host, redis_config.port);
 
         boost::asio::io_context ioc;
         flow_pilot::RedisDatabaseAsync::init(ioc, redis_config);
-        flow_pilot::get_logger()->info("Redis initialized successfully");
+        flow_pilot::Logger::get_logger()->info("Redis initialized successfully");
 
         std::string redis_connection = redis_config.host + ":" + std::to_string(redis_config.port);
-        flow_pilot::get_logger()->info("Workflow service initialized with Redis at {}", redis_connection);
+        flow_pilot::Logger::get_logger()->info("Workflow service initialized with Redis at {}", redis_connection);
 
         // Initialize the persistent database (currently SQLite) based on configuration
         auto& db = flow_pilot::DBFactory::get();
-        flow_pilot::get_logger()->info("Database initialized successfully at {}", sqlite_config.db_path);
+        flow_pilot::Logger::get_logger()->info("Database initialized successfully at {}", sqlite_config.db_path);
 
         boost::asio::signal_set signals(ioc, SIGINT, SIGTERM);
         signals.async_wait([&](boost::system::error_code const&, int) {

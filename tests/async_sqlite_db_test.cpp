@@ -1,3 +1,6 @@
+
+// async_sqlite_db_test_cpp
+
 #include <gtest/gtest.h>
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -19,11 +22,14 @@ TEST(AsyncSQLiteDBTest, DuplicateRequestFails) {
     rd.client_id = "dup-client";
     rd.request_id = "req-dup";
     rd.workflow_id = "wf-dup";
-    to_string(RequestStatus::RECEIVED, rd.status);
     rd.workflow_payload_size_bytes = 5;
 
-    std::string err1;
-    std::string err2;
+    std::string_view status_view;
+    to_string(RequestStatus::RECEIVED, status_view);
+    rd.status = status_view;
+
+    StatusCodes err1;
+    StatusCodes err2;
 
     // First add should succeed
     auto f1 = boost::asio::co_spawn(ioc,
@@ -48,8 +54,7 @@ TEST(AsyncSQLiteDBTest, DuplicateRequestFails) {
     ioc2.run();
     bool r2 = f2.get();
     EXPECT_FALSE(r2);
-    EXPECT_FALSE(err2.empty());
-    EXPECT_EQ(err2, error_msgs::DUPLICATE_REQUEST); // should be duplicate request error
+    EXPECT_EQ(err2, StatusCodes::DUPLICATE_REQUEST); // should be duplicate request error
 }
 
 TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
@@ -61,10 +66,13 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     rd.client_id = "active-client";
     rd.request_id = "req-active";
     rd.workflow_id = "wf-active";
-    to_string(RequestStatus::RECEIVED, rd.status);
     rd.workflow_payload_size_bytes = 20;
 
-    std::string err;
+    std::string_view status_view;
+    to_string(RequestStatus::RECEIVED, status_view);
+    rd.status = status_view;
+
+    StatusCodes err;
 
     // Add workflow
     auto fadd = boost::asio::co_spawn(ioc,
@@ -75,7 +83,7 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     ASSERT_TRUE(fadd.get());
 
     // Update status to COMPLETED via async API
-    std::string complete_status;
+    std::string_view complete_status;
     to_string(RequestStatus::COMPLETED, complete_status);
     boost::asio::io_context ioc2;
     auto& async_db2 = AsyncDatabase::get_instance();
@@ -122,11 +130,11 @@ TEST(AsyncSQLiteDBTest, AddAndQueryWorkflow) {
     wf.info.workflow_id = "wf-1";
     wf.workflow_type = "type-A";
     wf.workflow_version = "v1";
-    to_string(WorkflowStatus::ADMITTED, wf.status);
+    wf.status = to_string(WorkflowStatus::ADMITTED);
     wf.total_jobs = 1;
     wf.info.workflow_payload_size_bytes = 10;
 
-    std::string err;
+    StatusCodes err;
 
     auto fut = boost::asio::co_spawn(ioc,
         [&]() -> boost::asio::awaitable<bool> {
@@ -138,7 +146,7 @@ TEST(AsyncSQLiteDBTest, AddAndQueryWorkflow) {
     ioc.run();
 
     bool added = fut.get();
-    ASSERT_TRUE(added) << "add_workflow_async failed: " << err;
+    ASSERT_TRUE(added) << "add_workflow_async failed: " << status_code_to_string(err);
 
     // Verify via async DB API
     std::vector<WorkflowfullData> results;
@@ -168,10 +176,13 @@ TEST(AsyncSQLiteDBTest, UpdateWfStatusAndQueryActive) {
     wf.info.workflow_payload_size_bytes = 20;
     wf.workflow_type = "type-C";
     wf.workflow_version = "v1";
-    to_string(WorkflowStatus::ADMITTED, wf.status);
     wf.total_jobs = 2;
 
-    std::string err;
+    std::string_view status_view;
+    to_string(WorkflowStatus::ADMITTED, status_view);
+    wf.status = status_view;
+
+    StatusCodes err;
 
     // Add workflow
     auto fadd = boost::asio::co_spawn(ioc,
@@ -183,13 +194,14 @@ TEST(AsyncSQLiteDBTest, UpdateWfStatusAndQueryActive) {
 
     // Update status to RUNNING via async API
     boost::asio::io_context ioc2;
-    std::string running_status;
+    std::string_view running_status;
 
     auto& async_db2 = AsyncDatabase::get_instance();
     auto fupd = boost::asio::co_spawn(ioc2,
         [&]() -> boost::asio::awaitable<bool> {
             to_string(WorkflowStatus::RUNNING, running_status);
-            co_return co_await async_db2.update_workflow_status_async(wf.info.client_id, wf.info.workflow_id, running_status);
+            std::string status(running_status);
+            co_return co_await async_db2.update_workflow_status_async(wf.info.client_id, wf.info.workflow_id, status);
         }, boost::asio::use_future);
     ioc2.run();
     ASSERT_TRUE(fupd.get());

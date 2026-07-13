@@ -6,6 +6,30 @@ FlowPilot is a C++20 workflow orchestration service designed around asynchronous
 
 The current implementation focuses on workflow admission, validation, duplicate prevention, rate limiting, and persistence.
 
+## Architecture Goals
+
+FlowPilot is designed around several architectural principles:
+
+- High throughput using asynchronous I/O
+- Durable workflow persistence
+- Idempotent workflow admission
+- Strict separation of transport and business logic
+- Fast rejection of invalid requests
+- Stateless HTTP layer
+- Horizontally scalable admission service
+
+## Design Principles
+
+1. Asynchronous by Default - Request processing should never block I/O threads.
+2. Durability Before Execution - Accepted workflows are persisted before they can be scheduled.
+3. Admission Is Atomic - Idempotency, concurrency limits, and rate limiting are enforced as a single logical operation.
+4. Redis for Coordination, SQLite for Truth - Redis accelerates coordination; SQLite remains the authoritative source of state.
+5. Dependency Injection and Testability - Core services are accessed through interfaces to enable isolated unit testing.
+6. Separation of Concerns - Admission, persistence, scheduling, and execution remain independent subsystems.
+7. Scalability Through Stateless Services - The architecture is designed so multiple FlowPilot instances can eventually share Redis and 
+   persistent storage without fundamental redesign.
+
+
 ### Current Architecture
 
 ```text
@@ -20,25 +44,97 @@ Request Handler
   v
 Workflow Service
   |
+  +--> JSON Parsing
+  |
   +--> JSON Schema Validation
   |
   +--> Client Validation
   |
-  +--> Policy Validation
-  |
   +--> Redis Admission Control
+  |
+  +--> Persist Request
+  |
+  +--> Policy Validation
   |
   +--> Semantic Validation
   |
+  +--> Dependency Validation
+  |
   +--> DAG Validation
   |
-  +--> SQLite Persistence
+  +--> Persist Workflow
+  |
+  +--> Execution Initialization
   |
   +--> Redis Status Update
   |
   v
 HTTP Response
 ```
+Redis is intentionally placed before durable persistence.
+This provides:
+- Constant-time duplicate detection
+- Atomic request admission
+- Fast rate limiting
+- Reduced database load
+- Early rejection of malformed duplicate requests
+
+| Redis                 | SQLite            |
+| --------------------- | ----------------- |
+| Fast admission        | Durable storage   |
+| Duplicate detection   | Source of truth   |
+| Rate limiting         | Audit history     |
+| Active workflow state | Workflow metadata |
+| Temporary             | Persistent        |
+
+
+
+                    +------------------+
+                    |      Client      |
+                    +------------------+
+                             |
+                             v
+                 +-----------------------+
+                 |   Boost.Beast Server  |
+                 +-----------------------+
+                             |
+                             v
+                 +-----------------------+
+                 |   Request Handler     |
+                 +-----------------------+
+                             |
+                             v
+                 +-----------------------+
+                 |   Workflow Service    |
+                 +-----------------------+
+                     |             |
+          Validation |             | Persistence
+                     |             |
+        +------------+             +-------------+
+        |                                      |
+        v                                      v
++-------------------+                +------------------+
+|       Redis       |                |      SQLite      |
+|-------------------|                |------------------|
+| Rate limiting     |                | Workflows        |
+| Duplicate check   |                | Requests         |
+| Admission control |                | Jobs             |
+| Active state      |                | Dependencies     |
++-------------------+                +------------------+
+
+## Idempotent Request Processing
+
+Workflow submissions are designed to be idempotent.
+
+Each request contains a client identifier and request identifier.
+
+Redis atomically rejects duplicate requests before validation begins.
+
+This prevents:
+
+- duplicate workflow creation
+- repeated validation
+- accidental client retries
 
 ## Core Components
 

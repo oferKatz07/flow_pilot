@@ -56,28 +56,12 @@ ClientSqliteConfigManager::ClientSqliteConfigManager() {
 void ClientSqliteConfigManager::ensure_defaults() {
     auto& db = SQLiteDatabase::get_instance();
 
-    // Default rate limit plans
-    RateLimitConfig rplans[] = {
-        {"sandbox", 10, 60, 1},
-        {"basic", 100, 60, 5},
-        {"professional", 1000, 60, 10},
-        {"enterprise", 10000, 60, 50}
-    };
 
-    for (const auto& p : rplans) {
+    for (const auto& p : default_plans::rplans) {
         db.upsert_rate_limit_plan(p);
     }
 
-    // Default policy plans
-    PolicyPlan pplans[] = {
-        // name,         wfz, jwf, js,   wfrt, wfr,jrt, jr, cj, pj, wfr, rr,  pr
-        {"sandbox",      10,  5,   200,  300,   3,  60,  1, 2,  18,  1,   1,  1},
-        {"basic",        20,  10,  500,  600,   10, 300, 2, 5,  55,  10,  10, 10},
-        {"professional", 50,  50,  800,  6000,  20, 600, 3, 10, 90,  30,  30, 30},
-        {"enterprise",   100, 100, 1024, 12000, 40, 900, 5, 20, 180, 60,  60, 60}
-    };
-
-    for (const auto& p : pplans) {
+    for (const auto& p : default_plans::pplans) {
         db.upsert_policy_plan(p);
     }
 
@@ -92,7 +76,7 @@ void ClientSqliteConfigManager::ensure_defaults() {
         db.upsert_user_config(client_id, rl, pp);
     }
 
-    get_logger()->info("Inserted default rate/policy plans and clients into SQLite database");
+    Logger::get_logger()->info("Inserted default rate/policy plans and clients into SQLite database");
 }
 
 } // namespace flow_pilot
