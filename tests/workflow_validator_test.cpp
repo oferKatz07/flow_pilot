@@ -184,9 +184,11 @@ TEST_F(WorkflowServiceTest, InvalidJobTypes) {
 // Test valid minimal workflow
 TEST_F(WorkflowServiceTest, ValidMinimalWorkflow) {
     json workflow;
+    const std::string client_id = "client_1";
+    const std::string workflow_id = "test-" + generate_unique_id();
     workflow["request_id"] = "req-" + generate_unique_id();
-    workflow["client_id"] = "client_1";
-    workflow["workflow_id"] = "test-" + generate_unique_id();
+    workflow["client_id"] = client_id;
+    workflow["workflow_id"] = workflow_id;
     workflow["workflow_type"] = "order_processing";
 
     json job;
@@ -200,6 +202,13 @@ TEST_F(WorkflowServiceTest, ValidMinimalWorkflow) {
     EXPECT_TRUE(result.valid);
     EXPECT_EQ(result.status_code, StatusCodes::WORKFLOW_ADMITTED);
     EXPECT_TRUE(result.errors_msg.empty());
+
+    // Cleanup 
+    std::shared_ptr<RedisDatabaseAsync> redis_ =  RedisDatabaseAsync::get_instance();
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->remove_active_workflow_async(client_id, workflow_id)));
+
+
 }
 
 // Test valid complex workflow with dependencies
@@ -429,75 +438,68 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequest_RateLimitRejected_DoesNotAddWorkflo
     run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
 }
 
-// TEST_F(ActualRedisDatabaseTest, AdmitRequest_ActiveLimitRejected_RollsBack) {
-//     std::string client_id = "test-client-" + generate_unique_id();
-//     std::string req1 = "req-" + generate_unique_id();
-//     std::string wf1 = "wf-" + generate_unique_id();
-//     std::string req2 = "req-" + generate_unique_id();
-//     std::string wf2 = "wf-" + generate_unique_id();
-//     StatusCodes rejection_code;
+TEST_F(ActualRedisDatabaseTest, AdmitRequest_ActiveLimitRejected_RollsBack) {
+    std::string client_id = "test-client-" + generate_unique_id();
+    std::string req1 = "req-" + generate_unique_id();
+    std::string wf1 = "wf-" + generate_unique_id();
+    std::string req2 = "req-" + generate_unique_id();
+    std::string wf2 = "wf-" + generate_unique_id();
+    StatusCodes rejection_code;
 
-//     // First request should occupy the single active slot
-//     EXPECT_TRUE(run_async(shared_redis_ioc,
-//                           redis_->admit_request_async(client_id, req1, wf1, 1, 100, 10, rejection_code)));
-//     EXPECT_TRUE(rejection_code.empty());
+    // First request should occupy the single active slot
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id, req1, wf1, 1, 100, 10, rejection_code)));
+    // Second request should be rejected due to active limit and should not be added
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->admit_request_async(client_id, req2, wf2, 1, 100, 10, rejection_code)));
+    EXPECT_EQ(rejection_code, StatusCodes::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED);
 
-//     // Second request should be rejected due to active limit and should not be added
-//     EXPECT_FALSE(run_async(shared_redis_ioc,
-//                            redis_->admit_request_async(client_id, req2, wf2, 1, 100, 10, rejection_code)));
-//     std::cout << "AdmitRequest_ActiveLimitRejected_RollsBack - Rejection reason: " << rejection_code << std::endl;
-//     EXPECT_EQ(rejection_code, RequestStatus::RATE_LIMIT_EXCEEDED);
+    // Ensure wf2 was not left in the active set
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->remove_active_workflow_async(client_id, wf2)));
 
-//     // Ensure wf2 was not left in the active set
-//     EXPECT_FALSE(run_async(shared_redis_ioc,
-//                            redis_->remove_active_workflow_async(client_id, wf2)));
+    // Cleanup
+    run_async(shared_redis_ioc, redis_->remove_active_workflow_async(client_id, wf1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
+}
 
-//     // Cleanup
-//     run_async(shared_redis_ioc, redis_->remove_active_workflow_async(client_id, wf1));
-//     run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
-//     run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
-// }
+TEST_F(ActualRedisDatabaseTest, AdmitRequest_ExistingWorkflowIdIsIdempotent) {
+    std::string client_id = "test-client-" + generate_unique_id();
+    std::string req1 = "req-" + generate_unique_id();
+    std::string req2 = "req-" + generate_unique_id();
+    std::string wf = "wf-" + generate_unique_id();
+    StatusCodes rejection_code;
 
-// TEST_F(ActualRedisDatabaseTest, AdmitRequest_ExistingWorkflowIdIsIdempotent) {
-//     std::string client_id = "test-client-" + generate_unique_id();
-//     std::string req1 = "req-" + generate_unique_id();
-//     std::string req2 = "req-" + generate_unique_id();
-//     std::string wf = "wf-" + generate_unique_id();
-//     StatusCodes rejection_code;
+    // First admission should succeed
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->admit_request_async(client_id, req1, wf, 5, 100, 10, rejection_code)));
 
-//     // First admission should succeed
-//     EXPECT_TRUE(run_async(shared_redis_ioc,
-//                           redis_->admit_request_async(client_id, req1, wf, 5, 100, 10, rejection_code)));
-//     EXPECT_TRUE(rejection_code.empty());
+    // Second admission with a different request_id but same workflow_id should nos succeed
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->admit_request_async(client_id, req2, wf, 5, 100, 10, rejection_code)));
 
-//     // Second admission with a different request_id but same workflow_id should also succeed
-//     EXPECT_TRUE(run_async(shared_redis_ioc,
-//                           redis_->admit_request_async(client_id, req2, wf, 5, 100, 10, rejection_code)));
-//     EXPECT_TRUE(rejection_code.empty());
+    // Both request statuses should exist
+    std::string status1;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, req1, status1)));
+    EXPECT_EQ(status1, to_string(RequestStatus::RECEIVED));
 
-//     // Both request statuses should exist
-//     std::string status1;
-//     std::string expected_status;
-//     to_string(RequestStatus::RECEIVED, expected_status);
-//     ASSERT_TRUE(run_async(shared_redis_ioc,
-//                           redis_->fetch_request_status_async(client_id, req1, status1)));
-//     EXPECT_EQ(status1, expected_status);
+    std::string status2;
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis_->fetch_request_status_async(client_id, req2, status2)));
+    EXPECT_EQ(status2, to_string(RequestStatus::REJECTED));
 
-//     std::string status2;
-//     ASSERT_TRUE(run_async(shared_redis_ioc,
-//                           redis_->fetch_request_status_async(client_id, req2, status2)));
-//     EXPECT_EQ(status2, expected_status);
+    // Ensure the workflow ID was not duplicated in the active set by removing it once
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis_->remove_active_workflow_async(client_id, wf)));
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis_->remove_active_workflow_async(client_id, wf)));
 
-//     // Ensure the workflow ID was not duplicated in the active set by removing it once
-//     EXPECT_TRUE(run_async(shared_redis_ioc,
-//                           redis_->remove_active_workflow_async(client_id, wf)));
-//     EXPECT_FALSE(run_async(shared_redis_ioc,
-//                            redis_->remove_active_workflow_async(client_id, wf)));
-
-//     // Cleanup request entries
-//     run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
-//     run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
-// }
+    // Cleanup request entries
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req1));
+    run_async(shared_redis_ioc, redis_->release_request_id_async(client_id, req2));
+}
 
 int main(int argc, char **argv) {
 
