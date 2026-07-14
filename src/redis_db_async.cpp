@@ -11,12 +11,11 @@
 #include <sstream>
 #include <chrono>
 #include <ctime>
-#include <stdexcept>
 
 #include "flow_pilot_error_msgs.h"
 #include "logger.h"
 #include "config.h"
-#include "http_server.h"
+#include "db_interface.h"
 #include "redis_db_async.h"
 
 namespace flow_pilot {
@@ -409,8 +408,31 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
         -- SQLite remains the authoritative source for workflow state, workflow
         -- identity and request history.
 
+        local request_key = KEYS[1]
+        local active_workflows_key = KEYS[2]
+
+        -- Configuration parameters
+        local max_active_workflows = tonumber(ARGV[1])
+        local max_requests = tonumber(ARGV[2])
+        local window = tonumber(ARGV[3])
+        local key_ttl = tonumber(ARGV[8])
+        
+        -- Request identity parameters
+        local workflow_id = ARGV[4]
+        local client_id = ARGV[5]
+
+        -- Request status parameters
+        local received_status = ARGV[6]
+        local rejected_status = ARGV[7]
+
+        local function reject(reason) 
+            -- set request status to rejected
+            redis.call('SET', request_key, rejected_status, 'XX', 'KEEPTTL') 
+            return {0, reason} 
+        end
+
         -- Set request key to track it and prevent duplicates
-        local request_set = redis.call('SET', KEYS[1], 'RECEIVED', 'NX', 'EX', 900)
+        local request_set = redis.call('SET', request_key, received_status, 'NX', 'EX', key_ttl)
         if not request_set then
             return {0, 'duplicate'}
         end
@@ -420,53 +442,63 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
         local server_epoch = tonumber(redis_time[1])
 
         -- Update rate limit bucket using Redis server time
-        local rate_key_server_time = 'fp:rate:' .. ARGV[5] .. ':' .. server_epoch
+        local rate_key_server_time = 'fp:rate:' .. client_id .. ':' .. server_epoch
         local current_rate = redis.call('INCR', rate_key_server_time)
         if current_rate == 1 then
             -- expire slightly after the window to ensure correct accounting in case of redis clock skew
-            redis.call('EXPIRE', rate_key_server_time, ARGV[3] + 1)
+            redis.call('EXPIRE', rate_key_server_time, window + 1)
         end
 
         -- Compute total across the window
         local total = current_rate
-        for i = 1, tonumber(ARGV[3]) - 1 do
-            local historical_key = 'fp:rate:' .. ARGV[5] .. ':' .. (server_epoch - i)
+        for i = 1, window - 1 do
+            local historical_key = 'fp:rate:' .. client_id .. ':' .. (server_epoch - i)
             local value = tonumber(redis.call('GET', historical_key) or '0')
             total = total + value
         end
 
-        if total > tonumber(ARGV[2]) then
+        if total > max_requests then
             -- rollback rate increment
             redis.call('DECR', rate_key_server_time)
-            return {0, 'rate_limit'}
+            return reject('rate_limit')
         end
 
         -- Add workflow_id to active workflows set only after checks
-        local added = redis.call('SADD', KEYS[2], ARGV[4])
+        local added = redis.call('SADD', active_workflows_key, workflow_id)
         if added == 1 then
             -- Active count check after successfully adding a new workflow ID
-            local final_active_count = redis.call('SCARD', KEYS[2])
-            if final_active_count > tonumber(ARGV[1]) then
+            local final_active_count = redis.call('SCARD', active_workflows_key)
+            if final_active_count > max_active_workflows then
                 -- Max concurrent workflows exceeded after adding the new workflow id
                 -- Remove the newly added workflow and rollback rate
-                redis.call('SREM', KEYS[2], ARGV[4])
+                redis.call('SREM', active_workflows_key, workflow_id)
                 redis.call('DECR', rate_key_server_time)
-                return {0, 'active_limit'}
+                return reject('active_limit')
             end
         else
             redis.call('DECR', rate_key_server_time)
-            return {0, 'duplicate_workflow'}
+            return reject('duplicate_workflow')
         end
 
         return {1, 'ok'}
     )lua";
 
     std::vector<std::string> script_args;
+    // Add the configured client policy rate limit parameters
     script_args.push_back(std::to_string(max_active_workflows));
     script_args.push_back(std::to_string(max_requests));
     script_args.push_back(std::to_string(window_seconds));
+    // Add request identity parameters
     script_args.push_back(workflow_id);
     script_args.push_back(client_id);
+    // Add request status parametrs
+    script_args.push_back(std::string(to_string(RequestStatus::RECEIVED)));
+    script_args.push_back(std::string(to_string(RequestStatus::REJECTED)));
+    // Add configured Redis key TTL 
+    script_args.push_back(std::to_string(Config::get().redis().key_retention_ttl));
+
+    Logger::get_logger()->info("Rate limit parameters for client {} are: max_active_workflows {}, max_requests {}, window_seconds {}",
+                                client_id, max_active_workflows, max_requests, window_seconds);
 
     std::vector<std::string> lua_values;
     auto lua_ok = co_await execute_lua_script_async(lua_script, keys, script_args, lua_values);
@@ -478,6 +510,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     std::string status = lua_values[0];
     std::string detail = lua_values[1];
     if (status == "1") {
+        rejection_reason = StatusCodes::REQUEST_ADMITTED;
         co_return true;
     }
 
@@ -493,6 +526,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
         Logger::get_logger()->error("Unexpected Lua script failure: {}", detail);
         rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
     }
+    
+    Logger::get_logger()->error("Request was not admitted due to the following reason: {}", status_code_to_string(rejection_reason));
     co_return false;
 }
 
