@@ -42,6 +42,7 @@ struct InMemoryDBConfig {
     std::string host = "127.0.0.1";
     unsigned short port = 6379;
     std::string password;
+    unsigned short key_retention_ttl = 900;
 };
 
 // set default values for the database configuration

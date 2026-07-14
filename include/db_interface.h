@@ -56,6 +56,16 @@ inline bool to_string(RequestStatus status, std::string_view& str) {
     }
 }
 
+inline std::string_view to_string(RequestStatus status) {
+    switch(status) {
+        case RequestStatus::RECEIVED: return "RECEIVED"; 
+        case RequestStatus::REJECTED: return "REJECTED";
+        case RequestStatus::COMPLETED: return "COMPLETED";
+    }
+    
+    return "UNKNOWN";
+}
+
 inline bool request_status_from_string(const std::string& str, RequestStatus& request_status) {
     if (str == "RECEIVED") {
         request_status = RequestStatus::RECEIVED;

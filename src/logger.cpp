@@ -62,6 +62,9 @@ void Logger::initialize()
     if (!logger_) {
         throw std::runtime_error("Logger initialization failed: logger instance could not be created");
     }
+    
+    spdlog::register_logger(logger_);
+
     logger_->set_level(spd_level);
     logger_->set_pattern("[%Y-%m-%d %H:%M:%S] [%l] %v");
 
