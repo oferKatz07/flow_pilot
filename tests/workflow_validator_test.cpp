@@ -328,11 +328,9 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequestLuaCreatesValidatingEntry) {
                                                       rejection_code)));
 
     std::string status;
-    std::string_view expected_status;
-    to_string(RequestStatus::RECEIVED, expected_status);
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis_->fetch_request_status_async(client_id, request_id, status)));
-    EXPECT_EQ(status, expected_status);
+    EXPECT_EQ(status, std::string(to_string(RequestStatus::RECEIVED)));
 }
 
 TEST_F(ActualRedisDatabaseTest, DuplicateRequestRejectedWithoutChangingExistingStatus) {
@@ -350,11 +348,9 @@ TEST_F(ActualRedisDatabaseTest, DuplicateRequestRejectedWithoutChangingExistingS
                                                       10,
                                                       rejection_code)));
     std::string status_before;
-    std::string_view expected_status;
-    to_string(RequestStatus::RECEIVED, expected_status);
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis_->fetch_request_status_async(client_id, request_id, status_before)));
-    EXPECT_EQ(status_before, expected_status);
+    EXPECT_EQ(status_before, std::string(to_string(RequestStatus::RECEIVED)));
 
     EXPECT_FALSE(run_async(shared_redis_ioc,
                            redis_->admit_request_async(client_id,
@@ -389,11 +385,9 @@ TEST_F(ActualRedisDatabaseTest, RejectedRequestDoesNotAffectPreExistingRequestSt
                                                       10,
                                                       rejection_code)));
     std::string accepted_status_before;
-    std::string_view expected_status;
-    to_string(RequestStatus::RECEIVED, expected_status);
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis_->fetch_request_status_async(client_id, accepted_request_id, accepted_status_before)));
-    EXPECT_EQ(accepted_status_before, expected_status);
+    EXPECT_EQ(accepted_status_before, std::string(to_string(RequestStatus::RECEIVED)));
 
     EXPECT_FALSE(run_async(shared_redis_ioc,
                            redis_->admit_request_async(client_id,

@@ -40,7 +40,7 @@ public:
     virtual boost::asio::awaitable<bool> update_workflow_status_async(
         const std::string& client_id,
         const std::string& workflow_id,
-        const std::string& status) = 0;
+        const WorkflowStatus status) = 0;
 
     virtual boost::asio::awaitable<bool> get_all_active_workflows_async(
         std::vector<WorkflowfullData>& workflows) const = 0;

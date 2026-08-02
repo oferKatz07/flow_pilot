@@ -74,7 +74,7 @@ boost::asio::awaitable<bool> AsyncDatabase::add_workflow_async(
 boost::asio::awaitable<bool> AsyncDatabase::update_workflow_status_async(
     const std::string& client_id,
     const std::string& workflow_id,
-    const std::string& status)
+    const WorkflowStatus status)
 {
     auto executor = pool_.get_executor();
     co_await boost::asio::post(executor, boost::asio::use_awaitable);

@@ -11,52 +11,78 @@
 
 namespace flow_pilot {
 
-enum class ClientStatus {
-    ACTIVE,
-    SUSPENDED,
-    DISABLED,
-    PENDING,
-    DELETED
+enum class ClientStatus : uint8_t {
+    ACTIVE = 0,
+    SUSPENDED = 1,
+    DISABLED = 2,
+    PENDING = 3,
+    DELETED = 4,
+    // UNKNOWN must remain the last enumerator.
+    // Values >= UNKNOWN are considered invalid.
+    UNKNOWN
 };
 
-// Conversion functions for ClientStatus
-inline bool to_string(ClientStatus status, std::string_view& str) {
-    switch(status) {
-        case ClientStatus::ACTIVE: str = "ACTIVE"; return true;
-        case ClientStatus::SUSPENDED: str = "SUSPENDED"; return true;
-        case ClientStatus::DISABLED: str = "DISABLED"; return true;
-        case ClientStatus::PENDING: str = "PENDING"; return true;
-        case ClientStatus::DELETED: str = "DELETED"; return true;
-        default: return false;
+// Convertion from int to ClientStatus
+constexpr ClientStatus from_int_to_ClientStatus(int val) noexcept {
+    if (val >= 0 && val < static_cast<int>(ClientStatus::UNKNOWN)) {
+        return static_cast<ClientStatus>(val);
     }
+
+    return ClientStatus::UNKNOWN;
 }
 
-inline ClientStatus client_status_from_string(const std::string& str) {
+constexpr uint8_t to_int(ClientStatus status) noexcept
+{
+    return static_cast<uint8_t>(status);
+}
+
+inline ClientStatus client_status_from_string(const std::string& str) noexcept {
     if (str == "ACTIVE") return ClientStatus::ACTIVE;
     if (str == "SUSPENDED") return ClientStatus::SUSPENDED;
     if (str == "DISABLED") return ClientStatus::DISABLED;
     if (str == "PENDING") return ClientStatus::PENDING;
     if (str == "DELETED") return ClientStatus::DELETED;
-    throw std::invalid_argument("Unknown ClientStatus: " + str);
+
+    return ClientStatus::UNKNOWN;
+}
+
+inline std::string_view to_string(ClientStatus status) noexcept {
+    switch(status) {
+        case ClientStatus::ACTIVE: return "ACTIVE";
+        case ClientStatus::SUSPENDED: return "SUSPENDED";
+        case ClientStatus::DISABLED: return "DISABLED";
+        case ClientStatus::PENDING: return "PENDING";
+        case ClientStatus::DELETED: return "DELETED";
+    }
+    
+    return "UNKNOWN";
 }
 
 
-enum class RequestStatus {
-    RECEIVED,
-    REJECTED,
-    COMPLETED,
+enum class RequestStatus : uint8_t {
+    RECEIVED = 0,
+    REJECTED = 1,
+    COMPLETED = 2,
+    // UNKNOWN must remain the last enumerator.
+    // Values >= UNKNOWN are considered invalid.
+    UNKNOWN
 };
 
-inline bool to_string(RequestStatus status, std::string_view& str) {
-    switch(status) {
-        case RequestStatus::RECEIVED: str = "RECEIVED"; return true;
-        case RequestStatus::REJECTED: str = "REJECTED"; return true;
-        case RequestStatus::COMPLETED: str = "COMPLETED"; return true;
-        default: return false;
+// Convertion from int to RequestStatus
+constexpr RequestStatus from_int_to_RequestStatus(int val) noexcept {
+    if (val >= 0 && val < static_cast<int>(RequestStatus::UNKNOWN)) {
+        return static_cast<RequestStatus>(val);
     }
+
+    return RequestStatus::UNKNOWN;
 }
 
-inline std::string_view to_string(RequestStatus status) {
+constexpr uint8_t to_int(RequestStatus status) noexcept
+{
+    return static_cast<uint8_t>(status);
+}
+
+inline std::string_view to_string(RequestStatus status) noexcept {
     switch(status) {
         case RequestStatus::RECEIVED: return "RECEIVED"; 
         case RequestStatus::REJECTED: return "REJECTED";
@@ -66,7 +92,7 @@ inline std::string_view to_string(RequestStatus status) {
     return "UNKNOWN";
 }
 
-inline bool request_status_from_string(const std::string& str, RequestStatus& request_status) {
+inline bool request_status_from_string(const std::string& str, RequestStatus& request_status) noexcept {
     if (str == "RECEIVED") {
         request_status = RequestStatus::RECEIVED;
         return true;
@@ -83,40 +109,46 @@ inline bool request_status_from_string(const std::string& str, RequestStatus& re
 }
 
 
-enum class WorkflowStatus {
-    ADMITTED,
-    RUNNING,
-    COMPLETED,
-    FAILED,
-    CANCELED
+enum class WorkflowStatus: uint8_t {
+    ADMITTED = 0,
+    RUNNING = 1,
+    COMPLETED = 2,
+    FAILED = 3,
+    CANCELED = 4,
+    // UNKNOWN must remain the last enumerator.
+    // Values >= UNKNOWN are considered invalid.
+    UNKNOWN
 };
 
-// Conversion functions for WorkflowStatus
-inline bool to_string(WorkflowStatus status, std::string_view& str) {
-    switch(status) {
-        case WorkflowStatus::ADMITTED: str = "ADMITTED"; return true;
-        case WorkflowStatus::RUNNING: str = "RUNNING"; return true;
-        case WorkflowStatus::COMPLETED: str = "COMPLETED"; return true;
-        case WorkflowStatus::FAILED: str = "FAILED"; return true;
-        case WorkflowStatus::CANCELED: str = "CANCELED"; return true;
-        default: return false;
+// Convertion from int to WorkflowStatus
+constexpr WorkflowStatus from_int_to_WorkflowStatus(int val) noexcept {
+    if (val >= 0 && val < static_cast<int>(WorkflowStatus::UNKNOWN)) {
+        return static_cast<WorkflowStatus>(val);
     }
+
+    return WorkflowStatus::UNKNOWN;
 }
 
-inline std::string_view to_string(WorkflowStatus status) {
+constexpr uint8_t to_int(WorkflowStatus status) noexcept
+{
+    return static_cast<uint8_t>(status);
+}
+
+// Conversion functions for WorkflowStatus
+inline std::string_view to_string(WorkflowStatus status) noexcept{
     switch(status) {
         case WorkflowStatus::ADMITTED: return "ADMITTED";
         case WorkflowStatus::RUNNING: return "RUNNING";
         case WorkflowStatus::COMPLETED: return "COMPLETED";
         case WorkflowStatus::FAILED: return "FAILED";
         case WorkflowStatus::CANCELED: return "CANCELED";
-        default: return "";
+        default: return "UNKNOWN";
     }
 
-    return "";
+    return "UNKNOWN";
 }
 
-inline bool workflow_status_from_string(const std::string& str, WorkflowStatus& workflow_status) {
+inline bool workflow_status_from_string(const std::string& str, WorkflowStatus& workflow_status) noexcept {
     if (str == "ADMITTED") {
         workflow_status = WorkflowStatus::ADMITTED;
         return true;
@@ -140,29 +172,71 @@ inline bool workflow_status_from_string(const std::string& str, WorkflowStatus& 
     return false;
 }
 
-enum class JobStatus {
-    PENDING,
-    RUNNING,
-    COMPLETED,
-    FAILED,
-    CANCELED
+enum class JobStatus : uint8_t {
+    PENDING = 0,
+    READY = 1,
+    RUNNING = 2,
+    COMPLETED = 3,
+    FAILED = 4,
+    CANCELED = 5,
+    // UNKNOWN must remain the last enumerator.
+    // Values >= UNKNOWN are considered invalid.
+    UNKNOWN
 };
 
+// Convertion from int to JobStatus
+constexpr JobStatus from_int_to_JobStatus(int val) noexcept {
+    if (val >= 0 && val < static_cast<int>(JobStatus::UNKNOWN)) {
+        return static_cast<JobStatus>(val);
+    }
+
+    return JobStatus::UNKNOWN;
+}
+
 // Conversion functions for JobStatus
-inline bool to_string(JobStatus status, std::string_view& str) {
+constexpr uint8_t to_int(JobStatus status) noexcept
+{
+    return static_cast<uint8_t>(status);
+}
+
+inline std::string_view to_string(JobStatus status) noexcept{
     switch(status) {
-        case JobStatus::PENDING: str = "PENDING"; return true;
-        case JobStatus::RUNNING: str = "RUNNING"; return true;
-        case JobStatus::COMPLETED: str = "COMPLETED"; return true;
-        case JobStatus::FAILED: str = "FAILED"; return true;
-        case JobStatus::CANCELED: str = "CANCELED"; return true;
-        default: return false;
+        case JobStatus::PENDING: return "PENDING";
+        case JobStatus::READY: return "READY";
+        case JobStatus::RUNNING: return "RUNNING";
+        case JobStatus::COMPLETED: return "COMPLETED";
+        case JobStatus::FAILED: return "FAILED";
+        case JobStatus::CANCELED: return "CANCELED";
+        default: return "UNKNOWN";
     }
 }
 
-inline bool job_status_from_string(const std::string& str, JobStatus& job_status) {
+template <typename EnumT>
+inline std::string serialize_status(EnumT status)
+{
+    return std::string(to_string(status));
+}
+
+template <typename EnumT, typename FromIntFn>
+inline bool parse_status(const std::string& value, EnumT& status, FromIntFn from_int_fn)
+{
+    try {
+        const int parsed = std::stoi(value);
+        status = from_int_fn(parsed);
+        return status != EnumT::UNKNOWN;
+    } catch (...) {
+        status = EnumT::UNKNOWN;
+        return false;
+    }
+}
+
+inline bool job_status_from_string(const std::string& str, JobStatus& job_status) noexcept {
     if (str == "PENDING") {
         job_status = JobStatus::PENDING;
+        return true;
+    }
+    if (str == "READY") {
+        job_status = JobStatus::READY;
         return true;
     }
     if (str == "RUNNING") {
@@ -190,22 +264,31 @@ struct RequestData {
     std::string workflow_id;
     int workflow_payload_size_bytes = 0;
     std::string operation;
-    std::string status;
+    RequestStatus status;
     std::string reject_reason;
 };
 
 struct WorkflowfullData {
     RequestData info;
-    std::string status;
+    WorkflowStatus status;
     std::string workflow_type;
     std::string workflow_version;
     int total_jobs;
-    int jobs_running;
-    int jobs_completed;
-    int received_at;
-    int started_at;
-    int updated_at;
-    int last_state_change_at;
+    std::time_t received_at;
+    std::time_t started_at;
+    std::time_t completed_at;
+};
+
+struct WorkflowJob {
+    std::string job_uuid;
+    std::string client_id;
+    std::string workflow_id;
+    std::string job_id;
+    JobStatus status;
+    int retry_num;
+    std::time_t submitted_at;
+    std::time_t started_at;
+    std::time_t updated_at;
 };
 
 struct workflow_payload_data {
@@ -284,7 +367,7 @@ public:
     ) = 0;
 
     // Update the workflow status in the DB. This is used for durability and auditing of workflow execution.
-    virtual bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const std::string& status) = 0;
+    virtual bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const WorkflowStatus status) = 0;
 
     /// For recovery get all active workflows (with status RECEIVED, ADMITTED, RUNNING) from the DB.
     virtual bool get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const = 0;

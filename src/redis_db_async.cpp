@@ -497,9 +497,6 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::
     // Add configured Redis key TTL 
     script_args.push_back(std::to_string(Config::get().redis().key_retention_ttl));
 
-    Logger::get_logger()->info("Rate limit parameters for client {} are: max_active_workflows {}, max_requests {}, window_seconds {}",
-                                client_id, max_active_workflows, max_requests, window_seconds);
-
     std::vector<std::string> lua_values;
     auto lua_ok = co_await execute_lua_script_async(lua_script, keys, script_args, lua_values);
     if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {

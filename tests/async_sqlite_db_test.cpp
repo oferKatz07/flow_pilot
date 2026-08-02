@@ -23,10 +23,7 @@ TEST(AsyncSQLiteDBTest, DuplicateRequestFails) {
     rd.request_id = "req-dup";
     rd.workflow_id = "wf-dup";
     rd.workflow_payload_size_bytes = 5;
-
-    std::string_view status_view;
-    to_string(RequestStatus::RECEIVED, status_view);
-    rd.status = status_view;
+    rd.status = RequestStatus::RECEIVED;
 
     StatusCodes err1;
     StatusCodes err2;
@@ -67,10 +64,7 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     rd.request_id = "req-active";
     rd.workflow_id = "wf-active";
     rd.workflow_payload_size_bytes = 20;
-
-    std::string_view status_view;
-    to_string(RequestStatus::RECEIVED, status_view);
-    rd.status = status_view;
+    rd.status = RequestStatus::RECEIVED;
 
     StatusCodes err;
 
@@ -83,13 +77,11 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     ASSERT_TRUE(fadd.get());
 
     // Update status to COMPLETED via async API
-    std::string_view complete_status;
-    to_string(RequestStatus::COMPLETED, complete_status);
     boost::asio::io_context ioc2;
     auto& async_db2 = AsyncDatabase::get_instance();
     auto fupd = boost::asio::co_spawn(ioc2,
         [&]() -> boost::asio::awaitable<bool> {
-            rd.status = complete_status;
+            rd.status = RequestStatus::COMPLETED;
             co_return co_await async_db2.update_request_status_async(rd);
         }, boost::asio::use_future);
     ioc2.run();
@@ -111,7 +103,7 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     for (auto &r : list) {
         if (r.workflow_id == rd.workflow_id && r.client_id == rd.client_id) {
             found = true;
-            EXPECT_EQ(r.status, complete_status);
+            EXPECT_EQ(r.status, RequestStatus::COMPLETED);
         }
     }
     EXPECT_TRUE(found);
@@ -130,7 +122,7 @@ TEST(AsyncSQLiteDBTest, AddAndQueryWorkflow) {
     wf.info.workflow_id = "wf-1";
     wf.workflow_type = "type-A";
     wf.workflow_version = "v1";
-    wf.status = to_string(WorkflowStatus::ADMITTED);
+    wf.status = WorkflowStatus::ADMITTED;
     wf.total_jobs = 1;
     wf.info.workflow_payload_size_bytes = 10;
 
@@ -177,10 +169,7 @@ TEST(AsyncSQLiteDBTest, UpdateWfStatusAndQueryActive) {
     wf.workflow_type = "type-C";
     wf.workflow_version = "v1";
     wf.total_jobs = 2;
-
-    std::string_view status_view;
-    to_string(WorkflowStatus::ADMITTED, status_view);
-    wf.status = status_view;
+    wf.status = WorkflowStatus::ADMITTED;
 
     StatusCodes err;
 
@@ -194,14 +183,11 @@ TEST(AsyncSQLiteDBTest, UpdateWfStatusAndQueryActive) {
 
     // Update status to RUNNING via async API
     boost::asio::io_context ioc2;
-    std::string_view running_status;
 
     auto& async_db2 = AsyncDatabase::get_instance();
     auto fupd = boost::asio::co_spawn(ioc2,
         [&]() -> boost::asio::awaitable<bool> {
-            to_string(WorkflowStatus::RUNNING, running_status);
-            std::string status(running_status);
-            co_return co_await async_db2.update_workflow_status_async(wf.info.client_id, wf.info.workflow_id, status);
+            co_return co_await async_db2.update_workflow_status_async(wf.info.client_id, wf.info.workflow_id, WorkflowStatus::RUNNING);
         }, boost::asio::use_future);
     ioc2.run();
     ASSERT_TRUE(fupd.get());
@@ -222,7 +208,7 @@ TEST(AsyncSQLiteDBTest, UpdateWfStatusAndQueryActive) {
     for (auto &w : list) {
         if (w.info.workflow_id == wf.info.workflow_id && w.info.client_id == wf.info.client_id) {
             found = true;
-            EXPECT_EQ(w.status, running_status);
+            EXPECT_EQ(w.status, WorkflowStatus::RUNNING);
         }
     }
     EXPECT_TRUE(found);

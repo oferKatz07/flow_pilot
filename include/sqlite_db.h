@@ -82,7 +82,7 @@ public:
         StatusCodes& error_status
     ) override;
 
-    bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const std::string& status) override;
+    bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const WorkflowStatus status) override;
     
     bool get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const override;
 

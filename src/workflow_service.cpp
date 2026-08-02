@@ -121,9 +121,7 @@ bool WorkflowService::parse_request(const std::string& body, json& workflow_data
     request_info.workflow_payload_size_bytes = static_cast<int>(body.size());
     request_info.operation = "CREATE";
 
-    std::string_view status_view;
-    to_string(RequestStatus::RECEIVED, status_view);
-    request_info.status = std::string(status_view);
+    request_info.status = RequestStatus::RECEIVED;
 
     return true;
 }
@@ -180,9 +178,7 @@ bool WorkflowService::validate_workflow(const json& workflow_data, const PolicyP
     workflow_info.workflow_type = workflow_data.value("workflow_type", std::string());
     workflow_info.total_jobs = static_cast<int>(workflow_data["jobs"].size());
     workflow_info.workflow_version = Config::get().workflow().version;
-    std::string_view status_view;
-    to_string(WorkflowStatus::ADMITTED, status_view);
-    workflow_info.status = std::string(status_view);
+    workflow_info.status = WorkflowStatus::ADMITTED;
 
     return true;
 }
@@ -211,9 +207,10 @@ bool WorkflowService::validate_admission_client_workflow_policy(const json& work
     }
 
     for (const auto& job : workflow_data["jobs"]) {
-        int job_size_bytes = job.dump().size();
+        size_t job_size_bytes = job.dump().size();
         if (job_size_bytes > policy_config.max_job_size_bytes) {
-            error_msg = "Job '" + job["job_id"].get<std::string>() + "' size is " + std::to_string(job_size_bytes) + " bytes, but the maximum allowed is " + std::to_string(policy_config.max_job_size_bytes) + " bytes";
+            error_msg = "Job '" + job["job_id"].get<std::string>() + "' size is " + std::to_string(job_size_bytes); 
+            error_msg += " bytes, but the maximum allowed is " + std::to_string(policy_config.max_job_size_bytes) + " bytes";
             Logger::get_logger()->error(error_msg);
             rejection_reason = StatusCodes::JOB_SIZE_EXCEEDED;
             return false;
@@ -315,9 +312,7 @@ awaitable<ValidationResult> WorkflowService::handle_request_rejection(Validation
                                                                       RequestData& request_info, 
                                                                       const StatusCodes& rejection_reason,
                                                                       bool update_redis) {
-    std::string_view reject_status;
     std::string_view errors_msg;
-    to_string(RequestStatus::REJECTED, reject_status);
     errors_msg = status_code_to_string(rejection_reason);
 
    // Update request status in Redis since validation failed
@@ -325,7 +320,7 @@ awaitable<ValidationResult> WorkflowService::handle_request_rejection(Validation
     result.status_code = rejection_reason;
     result.errors_msg = errors_msg;
 
-    request_info.status = reject_status;
+    request_info.status = RequestStatus::REJECTED;
     request_info.reject_reason = errors_msg;
 
     if (update_redis) {
@@ -340,10 +335,7 @@ awaitable<ValidationResult> WorkflowService::handle_request_rejection(Validation
 
 awaitable<ValidationResult> WorkflowService::handle_request_accepted(ValidationResult& result, 
                                                                      RequestData& request_info) {
-    std::string_view ok_status_view;
-    to_string(RequestStatus::COMPLETED, ok_status_view);
-
-    request_info.status = ok_status_view;
+    request_info.status = RequestStatus::COMPLETED;
     request_info.reject_reason = error_msgs::WORKFLOW_ADMITTED;
 
     // co_await update_redis_request_status(request_info);
@@ -355,13 +347,11 @@ awaitable<ValidationResult> WorkflowService::handle_request_accepted(ValidationR
 }
 
 awaitable<void> WorkflowService::update_redis_request_status(const RequestData& request_info) {
-    if (!co_await RedisDatabaseAsync::get_instance()->update_request_status_async(request_info.client_id, request_info.request_id, request_info.status)) {
+    if (!co_await RedisDatabaseAsync::get_instance()->update_request_status_async(request_info.client_id, request_info.request_id, std::string(to_string(request_info.status)))) {
         Logger::get_logger()->warn("Failed to update Redis request status for {}/{}", request_info.client_id, request_info.request_id);
     }
 
-    std::string_view complete_status;
-    to_string(RequestStatus::COMPLETED, complete_status);
-    if(request_info.status != complete_status) {
+    if(request_info.status != RequestStatus::COMPLETED) {
         if (!co_await RedisDatabaseAsync::get_instance()->release_request_id_async(request_info.client_id, request_info.request_id)) {
             Logger::get_logger()->warn("Failed to release Redis request ID for {}/{}", request_info.client_id, request_info.request_id);
         }

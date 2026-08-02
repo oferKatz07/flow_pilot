@@ -47,7 +47,7 @@ public:
     boost::asio::awaitable<bool> update_workflow_status_async(
         const std::string& client_id,
         const std::string& workflow_id,
-        const std::string& status) override;
+        const WorkflowStatus status) override;
 
     boost::asio::awaitable<bool> get_all_active_workflows_async(
         std::vector<WorkflowfullData>& workflows) const override;
