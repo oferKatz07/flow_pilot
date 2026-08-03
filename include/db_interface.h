@@ -92,23 +92,6 @@ inline std::string_view to_string(RequestStatus status) noexcept {
     return "UNKNOWN";
 }
 
-inline bool request_status_from_string(const std::string& str, RequestStatus& request_status) noexcept {
-    if (str == "RECEIVED") {
-        request_status = RequestStatus::RECEIVED;
-        return true;
-    }
-    if (str == "REJECTED") {
-        request_status = RequestStatus::REJECTED;
-        return true;
-    }
-    if (str == "COMPLETED") {
-        request_status = RequestStatus::COMPLETED;
-        return true;
-    }
-    return false;
-}
-
-
 enum class WorkflowStatus: uint8_t {
     ADMITTED = 0,
     RUNNING = 1,
@@ -146,30 +129,6 @@ inline std::string_view to_string(WorkflowStatus status) noexcept{
     }
 
     return "UNKNOWN";
-}
-
-inline bool workflow_status_from_string(const std::string& str, WorkflowStatus& workflow_status) noexcept {
-    if (str == "ADMITTED") {
-        workflow_status = WorkflowStatus::ADMITTED;
-        return true;
-    }
-    if (str == "RUNNING") {
-        workflow_status = WorkflowStatus::RUNNING;
-        return true;
-    }
-    if (str == "COMPLETED") {
-        workflow_status = WorkflowStatus::COMPLETED;
-        return true;
-    }
-    if (str == "FAILED") {
-        workflow_status = WorkflowStatus::FAILED;
-        return true;
-    }
-    if (str == "CANCELED") {
-        workflow_status = WorkflowStatus::CANCELED;
-        return true;
-    }
-    return false;
 }
 
 enum class JobStatus : uint8_t {
@@ -228,34 +187,6 @@ inline bool parse_status(const std::string& value, EnumT& status, FromIntFn from
         status = EnumT::UNKNOWN;
         return false;
     }
-}
-
-inline bool job_status_from_string(const std::string& str, JobStatus& job_status) noexcept {
-    if (str == "PENDING") {
-        job_status = JobStatus::PENDING;
-        return true;
-    }
-    if (str == "READY") {
-        job_status = JobStatus::READY;
-        return true;
-    }
-    if (str == "RUNNING") {
-        job_status = JobStatus::RUNNING;
-        return true;
-    }
-    if (str == "COMPLETED") {
-        job_status = JobStatus::COMPLETED;
-        return true;
-    }
-    if (str == "FAILED") {
-        job_status = JobStatus::FAILED;
-        return true;
-    }
-    if (str == "CANCELED") {
-        job_status = JobStatus::CANCELED;
-        return true;
-    }
-    return false;
 }
 
 struct RequestData {

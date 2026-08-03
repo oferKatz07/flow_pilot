@@ -100,9 +100,8 @@ private:
     void create_workflows_table();
     void create_workflow_requests_table();
     void create_jobs_table();
-    void create_users_stats_table();
     void create_workflow_payload_table();
-    void create_table(const char* ddl_cmd);
+    void execute_ddl_cmd(const char* ddl_cmd);
     bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
 
     std::string db_path_;

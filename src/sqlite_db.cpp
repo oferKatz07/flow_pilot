@@ -461,8 +461,7 @@ bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, s
 bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
                                   StatusCodes& error_status) {
     const char* sql = "INSERT INTO workflows (client_id, workflow_id, workflow_type, version, status, total_jobs, \
-                                              jobs_running, jobs_completed, received_at, updated_at, \
-                                              last_state_change_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+                                              received_at) VALUES (?, ?, ?, ?, ?, ?, ?);";
     const sqlite3_int64 now = static_cast<sqlite3_int64>(std::time(nullptr));
     sqlite3_stmt* stmt = nullptr;
     bool ret_val = true;
@@ -484,11 +483,7 @@ bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
     sqlite3_bind_text(stmt, 4, workflow_data.workflow_version.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int(stmt, 5, to_int(workflow_data.status));
     sqlite3_bind_int(stmt, 6, workflow_data.total_jobs);
-    sqlite3_bind_int(stmt, 7, 0);
-    sqlite3_bind_int(stmt, 8, 0);
-    sqlite3_bind_int64(stmt, 9, now);
-    sqlite3_bind_int64(stmt, 10, now);
-    sqlite3_bind_int64(stmt, 11, now);
+    sqlite3_bind_int64(stmt, 7, now);
 
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
@@ -510,7 +505,22 @@ bool SQLiteDatabase::add_workflow(const WorkflowfullData& workflow_data,
 }
 
 bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const std::string& workflow_id, const WorkflowStatus status) {
-    const char* sql = "UPDATE workflows SET status = ?, updated_at = ? WHERE client_id = ? AND workflow_id = ?;";
+    std::string sql_cmd;
+    switch (status) {
+        case WorkflowStatus::COMPLETED:
+        case WorkflowStatus::FAILED:
+        case WorkflowStatus::CANCELED:
+            sql_cmd = "UPDATE workflows SET status = ?, completed_at = ? WHERE client_id = ? AND workflow_id = ?;";
+            break;
+        case WorkflowStatus::RUNNING:
+            sql_cmd = "UPDATE workflows SET status = ?, started_at = ? WHERE client_id = ? AND workflow_id = ?;";
+            break;
+        default:
+            Logger::get_logger()->error("Invalid status for update: {}", to_int(status));
+            return false; // Invalid status for update
+    }
+
+    const char* sql = sql_cmd.c_str();
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -599,12 +609,11 @@ bool SQLiteDatabase::create_schema() {
     create_workflows_table();
     create_workflow_payload_table();
     create_jobs_table();
-    create_users_stats_table();
     return true;
 }
 
 bool SQLiteDatabase::add_request_payload(const RequestData& request_data, const std::string& workflow_payload) {
-    const char* sql = "INSERT INTO workflow_payloads (client_id, workflow_id, payload) VALUES (?, ?, ?);";
+    const char* sql = "INSERT INTO workflow_payloads (client_id, request_id, workflow_id, payload) VALUES (?, ?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     bool ret_val = true;
 
@@ -617,8 +626,9 @@ bool SQLiteDatabase::add_request_payload(const RequestData& request_data, const 
     }
 
     sqlite3_bind_text(stmt, 1, request_data.client_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, request_data.workflow_id.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, workflow_payload.c_str(), -1, SQLITE_TRANSIENT); 
+    sqlite3_bind_text(stmt, 2, request_data.request_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, request_data.workflow_id.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 4, workflow_payload.c_str(), -1, SQLITE_TRANSIENT); 
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         std::string error_message = std::string("Failed to execute SQLite statement: ") + sqlite3_errmsg(db_);
@@ -679,7 +689,7 @@ void SQLiteDatabase::create_rate_limit_plans_table() {
         "  update_time INTEGER NOT NULL"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
 }
 
 void SQLiteDatabase::create_policy_plans_table() {
@@ -701,7 +711,7 @@ void SQLiteDatabase::create_policy_plans_table() {
         "  update_time INTEGER NOT NULL"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
 }
 
 void SQLiteDatabase::create_clients_table() {
@@ -716,7 +726,7 @@ void SQLiteDatabase::create_clients_table() {
         "  FOREIGN KEY(policy_plan_name) REFERENCES policy_plans(plan_name)"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
 }
 
 void SQLiteDatabase::create_workflow_requests_table() {
@@ -730,11 +740,10 @@ void SQLiteDatabase::create_workflow_requests_table() {
         "  status INTEGER NOT NULL,"
         "  reject_reason TEXT NOT NULL,"
         "  received_at INTEGER,"
-        "  PRIMARY KEY (client_id, request_id),"
-        "  FOREIGN KEY(client_id, workflow_id) REFERENCES workflows(client_id, workflow_id)"
+        "  PRIMARY KEY (client_id, request_id)"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
 }
 
 void SQLiteDatabase::create_workflows_table() {
@@ -746,61 +755,56 @@ void SQLiteDatabase::create_workflows_table() {
         "  version TEXT NOT NULL,"
         "  status INTEGER NOT NULL,"
         "  total_jobs INTEGER NOT NULL,"
-        "  jobs_running INTEGER NOT NULL,"
-        "  jobs_completed INTEGER NOT NULL,"
         "  received_at INTEGER NOT NULL,"
         "  started_at INTEGER,"
-        "  updated_at INTEGER NOT NULL,"
-        "  last_state_change_at INTEGER NOT NULL,"
+        "  completed_at INTEGER,"
         "  PRIMARY KEY (client_id, workflow_id),"
         "  FOREIGN KEY(client_id) REFERENCES clients(client_id)"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
 }
 
 
 void SQLiteDatabase::create_workflow_payload_table() {
     const char* ddl_cmd =
         "CREATE TABLE IF NOT EXISTS workflow_payloads ("
+        "  payload_sequence INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  client_id TEXT NOT NULL,"
+        "  request_id TEXT NOT NULL,"
         "  workflow_id TEXT NOT NULL,"
         "  payload TEXT NOT NULL,"
-        "  PRIMARY KEY (client_id, workflow_id),"
-        "  FOREIGN KEY(client_id, workflow_id) REFERENCES workflow_requests(client_id, workflow_id)"
+        "  UNIQUE (client_id, request_id)"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
+
+    // Create an index on the workflow_payloads table for faster lookups by client_id and workflow_id
+    execute_ddl_cmd(
+        "CREATE INDEX IF NOT EXISTS idx_payload_workflow ON workflow_payloads(client_id, workflow_id);"
+    );
 }
 
 void SQLiteDatabase::create_jobs_table() {
     const char* ddl_cmd =
         "CREATE TABLE IF NOT EXISTS jobs ("
+        "  job_uuid TEXT PRIMARY KEY,"
         "  client_id TEXT NOT NULL,"
         "  workflow_id TEXT NOT NULL,"
         "  job_id TEXT NOT NULL,"
         "  status INTEGER NOT NULL,"
-        "  completed_at INTEGER,"
         "  retry_count INTEGER NOT NULL,"
-        "  PRIMARY KEY (client_id, workflow_id, job_id),"
+        "  submitted_at INTEGER,"
+        "  started_at INTEGER,"
+        "  completed_at INTEGER,"
         "  FOREIGN KEY (client_id, workflow_id) REFERENCES workflows(client_id, workflow_id)"
+        "  UNIQUE (client_id, workflow_id, job_id)"
         ");";
 
-    create_table(ddl_cmd);
+    execute_ddl_cmd(ddl_cmd);
 }
 
-void SQLiteDatabase::create_users_stats_table() {
-    const char* ddl_cmd =
-        "CREATE TABLE IF NOT EXISTS users_stats ("
-        "  user_id TEXT PRIMARY KEY,"
-        "  requests INTEGER NOT NULL,"
-        "  last_request INTEGER"
-        ");";
-
-    create_table(ddl_cmd);
-}
-
-void SQLiteDatabase::create_table(const char* ddl_cmd) {
+void SQLiteDatabase::execute_ddl_cmd(const char* ddl_cmd) {
     char* err_msg = nullptr;
     const int ddl_rc = sqlite3_exec(db_, ddl_cmd, nullptr, nullptr, &err_msg);
     if (ddl_rc != SQLITE_OK) {
