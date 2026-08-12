@@ -194,7 +194,7 @@
         },
 
         "payload": {
-          "type": "object"
+          "type": "array"
         }
       }
     },
@@ -238,7 +238,7 @@
         },
 
         "payload": {
-          "type": "object"
+          "type": "array"
         },
 
         "timeout_ms": {
@@ -284,7 +284,7 @@
         },
 
         "payload": {
-          "type": "object"
+          "type": "array"
         },
 
         "timeout_ms": {

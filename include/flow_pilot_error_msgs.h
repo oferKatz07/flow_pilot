@@ -15,6 +15,7 @@ inline constexpr std::string_view  INVALID_JSON_FORMAT = "Invalid JSON format";
 inline constexpr std::string_view  SCHEMA_VALIDATION_FAILED = "Schema validation failed";
 inline constexpr std::string_view  CLIENT_NOT_FOUND = "Client not found";
 inline constexpr std::string_view  WORKFLOW_SIZE_EXCEEDED = "Workflow size exceeds the maximum allowed by client's policy";
+inline constexpr std::string_view  JOB_POLICY_VIOLATION = "Job parameter values violates client's policy constraints";
 inline constexpr std::string_view  JOB_COUNT_EXCEEDED = "Number of jobs in workflow exceeds the maximum allowed by client's policy";
 inline constexpr std::string_view  JOB_COUNT_ZERO = "Workflow must contain at least one job";
 inline constexpr std::string_view  JOB_SIZE_EXCEEDED = "A job in the workflow exceeds the maximum allowed size by client's policy";
@@ -38,6 +39,7 @@ enum class StatusCodes {
     SCHEMA_VALIDATION_FAILED,
     CLIENT_NOT_FOUND,
     WORKFLOW_SIZE_EXCEEDED,
+    JOB_POLICY_VIOLATION,
     JOB_COUNT_EXCEEDED,
     JOB_COUNT_ZERO,
     JOB_SIZE_EXCEEDED,
@@ -65,6 +67,8 @@ inline std::string_view status_code_to_string(StatusCodes status_code) {
             return error_msgs::CLIENT_NOT_FOUND;
         case StatusCodes::WORKFLOW_SIZE_EXCEEDED:
             return error_msgs::WORKFLOW_SIZE_EXCEEDED;
+        case StatusCodes::JOB_POLICY_VIOLATION:
+            return error_msgs::JOB_POLICY_VIOLATION;
         case StatusCodes::JOB_COUNT_EXCEEDED:
             return error_msgs::JOB_COUNT_EXCEEDED;
         case StatusCodes::JOB_COUNT_ZERO:

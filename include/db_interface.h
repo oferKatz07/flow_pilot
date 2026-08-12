@@ -62,7 +62,7 @@ inline std::string_view to_string(ClientStatus status) noexcept {
 enum class RequestStatus : uint8_t {
     RECEIVED = 0,
     REJECTED = 1,
-    COMPLETED = 2,
+    ADMITTED = 2,
     // UNKNOWN must remain the last enumerator.
     // Values >= UNKNOWN are considered invalid.
     UNKNOWN
@@ -86,7 +86,7 @@ inline std::string_view to_string(RequestStatus status) noexcept {
     switch(status) {
         case RequestStatus::RECEIVED: return "RECEIVED"; 
         case RequestStatus::REJECTED: return "REJECTED";
-        case RequestStatus::COMPLETED: return "COMPLETED";
+        case RequestStatus::ADMITTED: return "ADMITTED";
     }
     
     return "UNKNOWN";
@@ -94,10 +94,11 @@ inline std::string_view to_string(RequestStatus status) noexcept {
 
 enum class WorkflowStatus: uint8_t {
     ADMITTED = 0,
-    RUNNING = 1,
-    COMPLETED = 2,
-    FAILED = 3,
-    CANCELED = 4,
+    READY = 1,
+    RUNNING = 2,
+    COMPLETED = 3,
+    FAILED = 4,
+    CANCELED = 5,
     // UNKNOWN must remain the last enumerator.
     // Values >= UNKNOWN are considered invalid.
     UNKNOWN
@@ -121,6 +122,7 @@ constexpr uint8_t to_int(WorkflowStatus status) noexcept
 inline std::string_view to_string(WorkflowStatus status) noexcept{
     switch(status) {
         case WorkflowStatus::ADMITTED: return "ADMITTED";
+        case WorkflowStatus::READY: return "READY";
         case WorkflowStatus::RUNNING: return "RUNNING";
         case WorkflowStatus::COMPLETED: return "COMPLETED";
         case WorkflowStatus::FAILED: return "FAILED";
@@ -228,6 +230,20 @@ struct workflow_payload_data {
     std::string payload;
 };
 
+struct JobData {
+    std::string job_uuid;
+    std::string job_id;
+    JobStatus status;
+};
+
+struct WorkflowJobList {
+    std::string client_id;
+    std::string workflow_id;
+    int retry_count;
+    // List of the workflow jobs
+    std::vector<JobData> jobs;
+};
+
 class IDatabase {
 public:
     virtual ~IDatabase() = default;
@@ -277,9 +293,6 @@ public:
         StatusCodes& error_status
     ) = 0;
 
-    /// Get all workflows for the requested client from the DB. This is used for auditing and debugging purposes.
-    virtual bool get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const = 0;
-
     // Add a new received request and perform validations
     virtual bool add_request(
         const RequestData& request_data,
@@ -290,6 +303,9 @@ public:
 
     // Update the request status in the DB. This is used for durability and auditing of request processing.
     virtual bool update_request_status(const RequestData& request_data) = 0;
+
+    /// Get all workflows for the requested client from the DB. This is used for auditing and debugging purposes.
+    virtual bool get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const = 0;
 
     // Add a new workflow data to the DB. This is used for durability and auditing of workflow submissions.
     virtual bool add_workflow(
@@ -305,11 +321,36 @@ public:
 
     /// Get all workflows for the requested client from the DB. This is used for auditing and debugging purposes.
     virtual bool get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowfullData>& workflows) const = 0;
+    
+    // Set all pending workflow jobs status (job with status PENDING and READY) to FAILED
+    virtual bool fail_workflow(const std::string& client_id, const std::string& workflow_id) = 0;
+
+    // Get all jobs for a workflow from the DB
+    virtual bool get_all_jobs_for_workflow(const std::string& client_id, const std::string& workflow_id, 
+                                           std::vector<WorkflowJob>& jobs) const = 0;
+    
+    virtual bool add_workflow_jobs(
+        const WorkflowJobList& job_list,
+        StatusCodes& error_status
+    ) = 0;
+
+    // Update the workflow ready jobs in the DB
+    virtual bool update_ready_jobs(const std::string& client_id, const std::string& workflow_id, const std::vector<std::string>& jobs) = 0;
+
+    // Update the job status for a specific job in a workflow
+    virtual bool update_job_status(const std::string& client_id, const std::string& workflow_id, const std::string& job_id, 
+                                   const JobStatus status) = 0;
+
+    // Get a specific job data for a workflow from the DB
+    virtual bool get_job_data(const std::string& client_id, const std::string& workflow_id, const std::string& job_id, 
+                              WorkflowJob& job_data) const = 0;
+    
 
 private:
     /// Create required tables and indexes if they do not exist.
     virtual bool create_schema() = 0;
     virtual bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) = 0;
+    virtual bool fail_all_pending_jobs(const std::string& client_id, const std::string& workflow_id) = 0;
 };
 
 } // namespace flow_pilot

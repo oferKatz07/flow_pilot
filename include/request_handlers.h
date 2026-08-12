@@ -38,7 +38,7 @@ public:
     WorkflowValidationHandler();
     boost::asio::awaitable<http::response<http::string_body>> handle(const HandlerCtxData& ctx) override;
 private:
-    WorkflowService workflow_service_;
+    WorkflowAdmissionService workflow_service_;
 };
 
 class GetWorkflowListHandler final : public BaseHandler {

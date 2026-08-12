@@ -4,20 +4,22 @@
 #include <fstream>
 #include <exception>
 #include <queue>
+#include <boost/uuid/uuid.hpp>
+#include <boost/uuid/time_generator_v7.hpp>
+#include <boost/uuid/uuid_io.hpp>
 
 #include "flow_pilot_error_msgs.h"
 #include "logger.h"
 #include "client_config.h"
 #include "config.h"
 #include "client_config_manager_factory.h"
-#include "redis_db_async.h"
 #include "db_factory.h"
 #include "workflow_service.h"
 
 namespace flow_pilot {
 using namespace boost::asio;
 
-WorkflowService::WorkflowService(const std::string& schema_path)
+WorkflowAdmissionService::WorkflowAdmissionService(const std::string& schema_path)
 {
     std::ifstream schema_file(schema_path);
     if (!schema_file.is_open()) {
@@ -40,7 +42,7 @@ WorkflowService::WorkflowService(const std::string& schema_path)
     }
 }
 
- awaitable<ValidationResult> WorkflowService::submit_workflow(const std::string& body)
+ awaitable<ValidationResult> WorkflowAdmissionService::submit_workflow(const std::string& body)
 {
     json workflow_data;
     RequestData workflow_request_info;
@@ -65,33 +67,48 @@ WorkflowService::WorkflowService(const std::string& schema_path)
     // Check if the client can accept the request based on rate limits and active workflows
     bool res = co_await admit_request(workflow_request_info, client_config.rate_limit_config, rejection_reason);
     if (!res) {
-        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason, false);
+        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::ADMIT_REQUEST, rejection_reason);
     }
 
     // Persist the request in the DB for auditing purposes
     res = co_await persist_request(workflow_request_info, body, client_config, rejection_reason);
     if (!res) {
-        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
+        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::PERSIST_REQUEST, rejection_reason);
     }
 
     // Validate received workflow against client's policy plan and semantic correctness
     std::unordered_map<std::string, DagData> jobs_map;
+    std::unordered_map<std::string, job_runtime_data> jobs_runtime_info;
+    std::vector<std::string> ready_jobs;
     WorkflowfullData workflow_info;
-    res = validate_workflow(workflow_data, client_config.policy_config, jobs_map, workflow_info, rejection_reason);
+    res = get_jobs_runtime_info(workflow_data, client_config.policy_config, jobs_runtime_info, ready_jobs);
     if (!res) {
-        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
+        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::VALIDATE_WORKFLOW, 
+                                                    StatusCodes::JOB_POLICY_VIOLATION);
+    }
+    res = validate_workflow(workflow_data, client_config.policy_config, jobs_runtime_info, jobs_map, 
+                            workflow_info, rejection_reason);
+    if (!res) {
+        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::VALIDATE_WORKFLOW, 
+                                                    rejection_reason);
     }
     workflow_info.info = std::move(workflow_request_info);
 
-    res = co_await persist_workflow(workflow_info, rejection_reason);
+    res = co_await persist_workflow(workflow_info, jobs_map, client_config.policy_config.max_job_retries, 
+                                    rejection_reason);
     if (!res) {
-        co_return co_await handle_request_rejection(result, workflow_request_info, rejection_reason);
+        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::PERSIST_WORKFLOW, rejection_reason);
+    }
+
+    if (!co_await generate_workflow_runtime_data(workflow_data, client_config.policy_config, workflow_info, jobs_runtime_info, ready_jobs)) {
+        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
+        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::GENERATE_RUNTIME_DATA, rejection_reason);
     }
 
     co_return co_await handle_request_accepted(result, workflow_request_info);
 }
 
-bool WorkflowService::parse_request(const std::string& body, json& workflow_data, 
+bool WorkflowAdmissionService::parse_request(const std::string& body, json& workflow_data, 
                                     RequestData& request_info, ValidationResult& result) {
     try {
         workflow_data = json::parse(body);
@@ -126,7 +143,7 @@ bool WorkflowService::parse_request(const std::string& body, json& workflow_data
     return true;
 }
 
-bool WorkflowService::get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result) {
+bool WorkflowAdmissionService::get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result) {
     if (!ClientConfigManagerFactory::get().get_client_config(client_id, client_config)) {
         result.valid = false;
         result.status_code = StatusCodes::CLIENT_NOT_FOUND;
@@ -137,7 +154,7 @@ bool WorkflowService::get_client_config_data(const std::string& client_id, Clien
     return true;
 }
 
-boost::asio::awaitable<bool> WorkflowService::admit_request(const RequestData& request_info, 
+boost::asio::awaitable<bool> WorkflowAdmissionService::admit_request(const RequestData& request_info, 
                                                             const RateLimitConfig& rate_limit_config, 
                                                             StatusCodes& rejection_reason) {
     auto redis_db = RedisDatabaseAsync::get_instance();
@@ -150,7 +167,7 @@ boost::asio::awaitable<bool> WorkflowService::admit_request(const RequestData& r
                                                       rejection_reason);  
 }
 
-boost::asio::awaitable<bool> WorkflowService::persist_request(const RequestData& request_info, 
+boost::asio::awaitable<bool> WorkflowAdmissionService::persist_request(const RequestData& request_info, 
                                                               const std::string& body, 
                                                               const ClientConfig& client_config, 
                                                               StatusCodes& rejection_reason) {
@@ -158,7 +175,8 @@ boost::asio::awaitable<bool> WorkflowService::persist_request(const RequestData&
                                                           client_config, rejection_reason);
 }
 
-bool WorkflowService::validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
+bool WorkflowAdmissionService::validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
+                                        std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info, 
                                         std::unordered_map<std::string, DagData>& jobs_map, 
                                         WorkflowfullData& workflow_info,
                                         StatusCodes& rejection_reason) {
@@ -170,7 +188,7 @@ bool WorkflowService::validate_workflow(const json& workflow_data, const PolicyP
         return false;
     }
 
-    if (!validate_dependencies(workflow_data, jobs_map, rejection_reason)) {
+    if (!validate_dependencies(workflow_data, jobs_runtime_info, jobs_map, rejection_reason)) {
         return false;
     }
 
@@ -183,11 +201,40 @@ bool WorkflowService::validate_workflow(const json& workflow_data, const PolicyP
     return true;
 }
 
-boost::asio::awaitable<bool> WorkflowService::persist_workflow(const WorkflowfullData& workflow_info, StatusCodes& rejection_reason) {
-    co_return co_await DBFactory::get().add_workflow_async(workflow_info, rejection_reason);
+boost::asio::awaitable<bool> WorkflowAdmissionService::persist_workflow(const WorkflowfullData& workflow_info, 
+                                                               const std::unordered_map<std::string, DagData>& jobs_map, 
+                                                               int policy_jobs_retry_num,
+                                                               StatusCodes& rejection_reason) {
+    
+    bool ret_val = co_await DBFactory::get().add_workflow_async(workflow_info, rejection_reason);
+    if (ret_val) {
+        // Prepare the workflow jobs list to be persisted in the database
+        WorkflowJobList job_list;
+        boost::uuids::time_generator_v7 gen;
+        job_list.client_id = workflow_info.info.client_id;
+        job_list.workflow_id = workflow_info.info.workflow_id;
+        job_list.retry_count = policy_jobs_retry_num;
+        for (const auto& [job_id, dag_data] : jobs_map) {
+            JobData job_info;
+            job_info.job_uuid = boost::uuids::to_string(gen());
+            job_info.job_id = dag_data.job_id;
+            job_info.status = JobStatus::PENDING;
+            job_list.jobs.emplace_back(job_info);
+        }
+
+        ret_val = co_await DBFactory::get().add_workflow_jobs_async(job_list, rejection_reason);
+
+        if (ret_val) {
+            co_await DBFactory::get().update_workflow_status_async(workflow_info.info.client_id, workflow_info.info.workflow_id, WorkflowStatus::READY);
+        } else {
+            co_await DBFactory::get().update_workflow_status_async(workflow_info.info.client_id, workflow_info.info.workflow_id, WorkflowStatus::FAILED);
+        }
+    }
+
+    co_return ret_val;
 }
 
-bool WorkflowService::validate_admission_client_workflow_policy(const json& workflow_data,  
+bool WorkflowAdmissionService::validate_admission_client_workflow_policy(const json& workflow_data,  
                                                                 const PolicyPlan& policy_config, 
                                                                 StatusCodes& rejection_reason) {
     std::string error_msg;                                                        
@@ -220,7 +267,7 @@ bool WorkflowService::validate_admission_client_workflow_policy(const json& work
     return true;
 }
 
-bool WorkflowService::validate_semantic(const json& data, 
+bool WorkflowAdmissionService::validate_semantic(const json& data, 
                                         std::unordered_map<std::string, DagData>& jobs_map, 
                                         StatusCodes& rejection_reason)
 {
@@ -254,7 +301,8 @@ bool WorkflowService::validate_semantic(const json& data,
     return true;
 }
 
-bool WorkflowService::validate_dependencies(const json& data, 
+bool WorkflowAdmissionService::validate_dependencies(const json& data, 
+                                            std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info, 
                                             std::unordered_map<std::string, DagData>& jobs_map, 
                                             StatusCodes& rejection_reason)
 {
@@ -272,8 +320,9 @@ bool WorkflowService::validate_dependencies(const json& data,
                 rejection_reason = StatusCodes::MISSING_DEPENDENCY;
                 return false;
             }
-
+            // Add the current job to the outgoing edges (successors list) of its dependencies
             jobs_map[dep_name].outgoing_edges.insert(job.first);
+            jobs_runtime_info[dep_name].successors.push_back(job.first);
         }
 
         if (job.second.incoming_edges.empty()) {
@@ -308,10 +357,10 @@ bool WorkflowService::validate_dependencies(const json& data,
     return true;
 }
 
-awaitable<ValidationResult> WorkflowService::handle_request_rejection(ValidationResult& result, 
-                                                                      RequestData& request_info, 
-                                                                      const StatusCodes& rejection_reason,
-                                                                      bool update_redis) {
+awaitable<ValidationResult> WorkflowAdmissionService::handle_request_rejection(ValidationResult& result, 
+                                                                      RequestData& request_info,
+                                                                      ValidationStage validation_stage,
+                                                                      const StatusCodes& rejection_reason) {
     std::string_view errors_msg;
     errors_msg = status_code_to_string(rejection_reason);
 
@@ -323,22 +372,29 @@ awaitable<ValidationResult> WorkflowService::handle_request_rejection(Validation
     request_info.status = RequestStatus::REJECTED;
     request_info.reject_reason = errors_msg;
 
-    if (update_redis) {
+    if ( validation_stage >= ValidationStage::PERSIST_REQUEST) {
         co_await update_redis_request_status(request_info);
     }
 
-    // Update request status in the database
-    co_await DBFactory::get().update_request_status_async(request_info);
+    if ( validation_stage > ValidationStage::PERSIST_REQUEST) {
+        // Update request status in the database
+        co_await DBFactory::get().update_request_status_async(request_info);
+    }
+
+    if ( validation_stage > ValidationStage::PERSIST_REQUEST) {
+        // Update Workflow status and its jobs status to FAILED
+        co_await DBFactory::get().fail_workflow_async(request_info.client_id, request_info.workflow_id);
+    }
 
     co_return result;
 }
 
-awaitable<ValidationResult> WorkflowService::handle_request_accepted(ValidationResult& result, 
+awaitable<ValidationResult> WorkflowAdmissionService::handle_request_accepted(ValidationResult& result, 
                                                                      RequestData& request_info) {
-    request_info.status = RequestStatus::COMPLETED;
+    request_info.status = RequestStatus::ADMITTED;
     request_info.reject_reason = error_msgs::WORKFLOW_ADMITTED;
 
-    // co_await update_redis_request_status(request_info);
+    co_await update_redis_request_status(request_info);
 
     // Update request status in the database
     co_await DBFactory::get().update_request_status_async(request_info);
@@ -346,12 +402,12 @@ awaitable<ValidationResult> WorkflowService::handle_request_accepted(ValidationR
     co_return result;
 }
 
-awaitable<void> WorkflowService::update_redis_request_status(const RequestData& request_info) {
+awaitable<void> WorkflowAdmissionService::update_redis_request_status(const RequestData& request_info) {
     if (!co_await RedisDatabaseAsync::get_instance()->update_request_status_async(request_info.client_id, request_info.request_id, std::string(to_string(request_info.status)))) {
         Logger::get_logger()->warn("Failed to update Redis request status for {}/{}", request_info.client_id, request_info.request_id);
     }
 
-    if(request_info.status != RequestStatus::COMPLETED) {
+    if(request_info.status != RequestStatus::ADMITTED) {
         if (!co_await RedisDatabaseAsync::get_instance()->release_request_id_async(request_info.client_id, request_info.request_id)) {
             Logger::get_logger()->warn("Failed to release Redis request ID for {}/{}", request_info.client_id, request_info.request_id);
         }
@@ -362,4 +418,124 @@ awaitable<void> WorkflowService::update_redis_request_status(const RequestData& 
     }
 }
 
-} // namespace flow_pilot
+boost::asio::awaitable<bool> WorkflowAdmissionService::generate_workflow_runtime_data(const json& workflow_data, const PolicyPlan& policy_config, 
+                                                              const WorkflowfullData& workflow_info, 
+                                                              const std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info,
+                                                              const std::vector<std::string>& ready_jobs) {
+    workflow_runtime_info workflow_runtime;
+    // Set the Workflow identity
+    workflow_runtime.identity.client_id = workflow_info.info.client_id;
+    workflow_runtime.identity.workflow_id = workflow_info.info.workflow_id;
+    // Set the Workflow runtime data
+    workflow_runtime.workflow.workflow_id = workflow_info.info.workflow_id;
+    workflow_runtime.workflow.status = to_string(WorkflowStatus::RUNNING);
+    workflow_runtime.workflow.max_concurrent_jobs = policy_config.max_concurrent_jobs; 
+    workflow_runtime.workflow.max_runtime_sec = policy_config.max_workflow_runtime_sec;
+    workflow_runtime.workflow.total_jobs = workflow_info.total_jobs;
+    workflow_runtime.workflow.pending_jobs = workflow_info.total_jobs - static_cast<int>(ready_jobs.size());
+    workflow_runtime.workflow.completed_jobs = 0;
+    workflow_runtime.workflow.failed_jobs = 0;
+
+    // Update the workflow jobs runtime data
+    for (const auto& [job_id, job_data] : jobs_runtime_info) {
+        workflow_runtime.jobs.push_back(job_data);
+    }
+
+    if (!co_await RedisDatabaseAsync::get_instance()->create_workflow_runtime_data_async(workflow_runtime)) {
+        Logger::get_logger()->error("Failed to create workflow runtime data in Redis for {}/{}", workflow_info.info.client_id, workflow_info.info.workflow_id);
+        co_return false;
+    }
+
+    // Update the jobs payload in redis
+    // To minimize the required stack the payload is added one job at a time
+    std::vector<std::string> added_payload_jobs;
+    for (const auto& job : workflow_data["jobs"]) {
+        std::vector<uint8_t> job_payload;
+        if (job.contains("payload") && !job["payload"].is_null()) {
+            // Update redis only with jobs that have a payload
+            std::string job_id = job["job_id"].get<std::string>();
+            job_payload = job["payload"].get<std::vector<uint8_t>>();
+            if (!co_await RedisDatabaseAsync::get_instance()->set_job_payload_async(workflow_runtime.identity, job_id, job_payload)) {
+                Logger::get_logger()->error("Failed to add job payload in Redis for {}/{}/{}", 
+                                            workflow_info.info.client_id, workflow_info.info.workflow_id, job["job_id"].get<std::string>());
+                co_await RedisDatabaseAsync::get_instance()->delete_all_jobs_payload_async(workflow_runtime.identity, added_payload_jobs);
+                co_await RedisDatabaseAsync::get_instance()->delete_workflow_runtime_data_async(workflow_runtime);
+                co_return false;
+            }
+            
+            added_payload_jobs.push_back(job_id);
+        }
+    }
+    // Persist Redy job status
+    if (!co_await DBFactory::get().update_ready_jobs_async(workflow_runtime.identity.client_id, 
+                                                           workflow_runtime.identity.workflow_id, ready_jobs)) {
+        Logger::get_logger()->error("Failed to publish ready jobs in Redis for {}/{}", workflow_info.info.client_id, workflow_info.info.workflow_id);
+        co_await RedisDatabaseAsync::get_instance()->delete_all_jobs_payload_async(workflow_runtime.identity, added_payload_jobs);
+        co_await RedisDatabaseAsync::get_instance()->delete_workflow_runtime_data_async(workflow_runtime);
+        co_return false;
+    }
+
+    // Update the ready jobes queue
+    if (!co_await RedisDatabaseAsync::get_instance()->publish_workflow_ready_jobs_async(workflow_runtime.identity, ready_jobs)) {
+        Logger::get_logger()->error("Failed to publish ready jobs in Redis for {}/{}", workflow_info.info.client_id, workflow_info.info.workflow_id);
+        co_await RedisDatabaseAsync::get_instance()->delete_all_jobs_payload_async(workflow_runtime.identity, added_payload_jobs);
+        co_await RedisDatabaseAsync::get_instance()->delete_workflow_runtime_data_async(workflow_runtime);
+        co_return false;
+    }
+
+    co_return true;
+}
+
+bool WorkflowAdmissionService::get_jobs_runtime_info(const json& workflow_data, 
+                                            const PolicyPlan& policy_config,
+                                            std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info,
+                                            std::vector<std::string>& ready_jobs) {
+    for (const auto& job : workflow_data["jobs"]) {
+        job_runtime_data job_info;
+        job_info.job_id = job["job_id"].get<std::string>();
+        job_info.remaining_dependencies = static_cast<int>(job.value("depends_on", json::array()).size());
+        job_info.priority = job.value("priority", policy_config.max_job_priority);
+        job_info.timeout_sec = job.value("timeout_sec", policy_config.max_job_runtime_sec);
+        job_info.max_retries = job.value("max_retries", policy_config.max_job_retries);
+        job_info.current_retry_count = 0;
+        job_info.retry_delay_sec = job.value("retry_delay_sec", 0);
+        job_info.retry_backoff_policy = job.value("retry_backoff_policy", "IMMEDIAT");
+        if (job_info.remaining_dependencies == 0) {
+            ready_jobs.push_back(job_info.job_id);
+            job_info.status = to_string(JobStatus::READY);
+        } else {
+            job_info.status = to_string(JobStatus::PENDING);
+        }
+
+        if (job_info.remaining_dependencies < 0) {
+            Logger::get_logger()->error("Job '{}' has negative remaining dependencies: {}", job_info.job_id, job_info.remaining_dependencies);
+            return false;
+        }
+        if (job_info.remaining_dependencies > policy_config.max_job_dependencies) {
+            Logger::get_logger()->error("Job '{}' has too many remaining dependencies: {}", job_info.job_id, job_info.remaining_dependencies);
+            return false;
+        }
+        if (job_info.priority > policy_config.max_job_priority) {
+            Logger::get_logger()->error("Job '{}' priority {} exceeds max allowed {}", job_info.job_id, job_info.priority, policy_config.max_job_priority);
+            return false;
+        }
+        if (job_info.timeout_sec > policy_config.max_job_runtime_sec) {
+            Logger::get_logger()->error("Job '{}' timeout {} exceeds max allowed {}", job_info.job_id, job_info.timeout_sec, policy_config.max_job_runtime_sec);
+            return false;
+        }
+        if (job_info.max_retries > policy_config.max_job_retries) {
+            Logger::get_logger()->error("Job '{}' max retries {} exceeds max allowed {}", job_info.job_id, job_info.max_retries, policy_config.max_job_retries);
+            return false;
+        }
+        if (job_info.retry_delay_sec > policy_config.max_job_retry_delay_sec) {
+            Logger::get_logger()->error("Job '{}' retry delay {} exceeds max allowed {}", job_info.job_id, job_info.retry_delay_sec, policy_config.max_job_retry_delay_sec);
+            return false;
+        }
+
+        jobs_runtime_info[job_info.job_id] = job_info;
+    }
+
+    return true;
+}
+
+}// namespace flow_pilot

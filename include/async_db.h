@@ -56,6 +56,19 @@ public:
         const std::string& client_id,
         std::vector<WorkflowfullData>& workflows) const override;
 
+    boost::asio::awaitable<bool> fail_workflow_async(
+        const std::string& client_id,
+        const std::string& workflow_id) override;
+
+    boost::asio::awaitable<bool> add_workflow_jobs_async(
+        const WorkflowJobList& job_list,
+        StatusCodes& error_status) override;
+
+    boost::asio::awaitable<bool> update_ready_jobs_async(
+        const std::string& client_id,
+        const std::string& workflow_id,
+        const std::vector<std::string>& job_ids) override;
+
 private:
     explicit AsyncDatabase();
     static IDatabase& get_db_instance();

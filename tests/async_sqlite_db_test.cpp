@@ -76,12 +76,12 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     ioc.run();
     ASSERT_TRUE(fadd.get());
 
-    // Update status to COMPLETED via async API
+    // Update status to ADMITTED via async API
     boost::asio::io_context ioc2;
     auto& async_db2 = AsyncDatabase::get_instance();
     auto fupd = boost::asio::co_spawn(ioc2,
         [&]() -> boost::asio::awaitable<bool> {
-            rd.status = RequestStatus::COMPLETED;
+            rd.status = RequestStatus::ADMITTED;
             co_return co_await async_db2.update_request_status_async(rd);
         }, boost::asio::use_future);
     ioc2.run();
@@ -103,7 +103,7 @@ TEST(AsyncSQLiteDBTest, UpdateReqStatusAndQueryUserRequests) {
     for (auto &r : list) {
         if (r.workflow_id == rd.workflow_id && r.client_id == rd.client_id) {
             found = true;
-            EXPECT_EQ(r.status, RequestStatus::COMPLETED);
+            EXPECT_EQ(r.status, RequestStatus::ADMITTED);
         }
     }
     EXPECT_TRUE(found);

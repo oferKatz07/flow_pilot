@@ -25,11 +25,11 @@ namespace default_plans {
     
     // Default policy plans
     PolicyPlan const pplans[] = {
-        // name,         wfz, jwf, js,   wfrt, wfr,jrt, jr, cj, pj, wfr, rr,  pr
-        {"sandbox",      10,  5,   300,  300,   3,  60,  1, 2,  18,  1,   1,  1},
-        {"basic",        20,  10,  500,  600,   10, 300, 2, 5,  55,  10,  10, 10},
-        {"professional", 50,  50,  800,  6000,  20, 600, 3, 10, 90,  30,  30, 30},
-        {"enterprise",   100, 100, 1024, 12000, 40, 900, 5, 20, 180, 60,  60, 60}
+        // name,         wfz, jwf, js,   wfrt, wfr,jrt, jr, cj, pj,  jd  jrd jrbp  jmp  wfr, rr,  pr
+        {"sandbox",      10,  5,   500,  300,   3,  60,  1, 2,  18,   3,  1,   0,   5,   1,   1,  1},
+        {"basic",        20,  10,  800,  600,   10, 300, 2, 5,  55,   6,  1,   0,   10,  10,  10, 10},
+        {"professional", 50,  50,  1024, 6000,  20, 600, 3, 10, 90,   15, 3,   0,   15,  30,  30, 30},
+        {"enterprise",   100, 100, 1024, 12000, 40, 900, 5, 20, 180,  25, 5,   0,   20,  60,  60, 60}
     };
 
 } // namespace default_plans

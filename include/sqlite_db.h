@@ -88,12 +88,34 @@ public:
 
     bool get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowfullData>& workflows) const override;
 
+    bool fail_workflow(const std::string& client_id, const std::string& workflow_id) override;
+
+    bool get_all_jobs_for_workflow(const std::string& client_id, const std::string& workflow_id, 
+                                   std::vector<WorkflowJob>& jobs) const override;
+
+    bool add_workflow_jobs(
+        const WorkflowJobList& job_list,
+        StatusCodes& error_status
+    ) override;
+
+    bool get_job_data(const std::string& client_id, const std::string& workflow_id, 
+                      const std::string& job_id, WorkflowJob& job_data) const override;
+
+    bool update_ready_jobs(const std::string& client_id, const std::string& workflow_id, 
+                           const std::vector<std::string>& jobs) override;
+
+    bool update_job_status(const std::string& client_id, const std::string& workflow_id, 
+                           const std::string& job_id, const JobStatus status) override;
+
 private:
     explicit SQLiteDatabase(const std::string& db_path);
-    bool create_schema() override;
-    bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) override;
-
     void init_db();
+    bool create_schema() override;
+    
+    bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
+    bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) override;
+    bool fail_all_pending_jobs(const std::string& client_id, const std::string& workflow_id) override;
+
     void create_rate_limit_plans_table();
     void create_policy_plans_table();
     void create_clients_table();
@@ -102,7 +124,6 @@ private:
     void create_jobs_table();
     void create_workflow_payload_table();
     void execute_ddl_cmd(const char* ddl_cmd);
-    bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
 
     std::string db_path_;
     sqlite3* db_ = nullptr;

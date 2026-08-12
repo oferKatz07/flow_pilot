@@ -48,6 +48,19 @@ public:
     virtual boost::asio::awaitable<bool> get_all_workflows_for_client_async(
         const std::string& client_id,
         std::vector<WorkflowfullData>& workflows) const = 0;
+
+    virtual boost::asio::awaitable<bool> fail_workflow_async(
+        const std::string& client_id,
+        const std::string& workflow_id) = 0;
+        
+    virtual boost::asio::awaitable<bool> add_workflow_jobs_async(
+        const WorkflowJobList& job_list,
+        StatusCodes& error_status) = 0;
+
+    virtual boost::asio::awaitable<bool> update_ready_jobs_async(
+        const std::string& client_id,
+        const std::string& workflow_id,
+        const std::vector<std::string>& job_ids) = 0;
 };
 
 } // namespace flow_pilot

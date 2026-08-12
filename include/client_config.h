@@ -27,6 +27,11 @@ struct PolicyPlan {
     int max_job_retries;
     int max_concurrent_jobs;
     int max_pending_jobs;
+    // job policies
+    int max_job_dependencies;
+    int max_job_retry_delay_sec;
+    int default_retry_backoff_policy;
+    int max_job_priority;
     // Data retention policies
     int workflow_retention_days;
     int request_retention_days;
@@ -44,5 +49,13 @@ struct ClientConfig {
     RateLimitConfig rate_limit_config;
     PolicyPlan policy_config;
 };
+
+enum class JobRetryBackoffPolicy {
+    IMMEDIATE = 0,
+    FIXED_DELAY = 1,
+    LINEAR = 2,
+    EXPONENTIAL = 3
+};
+
 
 } // namespace flow_pilot

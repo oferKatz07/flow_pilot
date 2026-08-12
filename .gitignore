@@ -1,4 +1,15 @@
 build/
 logs/
+agents/
+skills/
+tools/
+AGENTS.md
+fbw.yaml
+pyproject.toml
 .vscode/
 .github/
+.claude/
+.fbw/
+.venv/
+.mcp.json
+
