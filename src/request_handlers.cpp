@@ -2,7 +2,7 @@
 // request_handlers.cpp - Implementation of request handlers for handling the FlowPilot received HTTP requests
 
 #include "request_handlers.h"
-#include "workflow_service.h"
+#include "workflow_admission_service.h"
 #include "logger.h"
 #include "config.h"
 

@@ -1,5 +1,5 @@
 
-// workflow_service.cpp - Implementation of WorkflowService for FlowPilot
+// workflow_admission_service.cpp - Implementation of WorkflowService for FlowPilot
 
 #include <fstream>
 #include <exception>
@@ -14,7 +14,7 @@
 #include "config.h"
 #include "client_config_manager_factory.h"
 #include "db_factory.h"
-#include "workflow_service.h"
+#include "workflow_admission_service.h"
 
 namespace flow_pilot {
 using namespace boost::asio;

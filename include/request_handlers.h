@@ -7,7 +7,7 @@
 #include <string_view>
 #include <boost/beast/http.hpp>
 
-#include "workflow_service.h"
+#include "workflow_admission_service.h"
 
 namespace flow_pilot {
 namespace beast = boost::beast;

@@ -8,7 +8,7 @@
 #include <unordered_map>
 
 #include "flow_pilot_error_msgs.h"
-#include "workflow_service.h"
+#include "workflow_admission_service.h"
 #include "config.h"
 #include "redis_db_async.h"
 #include "sqlite_db.h"

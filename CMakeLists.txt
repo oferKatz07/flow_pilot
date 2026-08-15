@@ -52,7 +52,7 @@ set(FLOW_PILOT_SOURCES
     src/client_config_manager_factory.cpp
     src/request_handlers.cpp
     src/http_server.cpp
-    src/workflow_service.cpp
+    src/workflow_admission_service.cpp
 )
 
 # Build a library from all project sources (exclude main.cpp)

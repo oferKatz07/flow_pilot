@@ -2,7 +2,7 @@
 // main.cpp - Entry point for FlowPilot application
 
 #include "http_server.h"
-#include "workflow_service.h"
+#include "workflow_admission_service.h"
 #include "config.h"
 #include "logger.h"
 #include "redis_db_async.h"
