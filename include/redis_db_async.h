@@ -94,7 +94,9 @@ public:
         std::unordered_map<std::string, std::string>& workflow_data) const = 0;
     virtual boost::asio::awaitable<bool> publish_workflow_ready_jobs_async(const workflow_identity& workflow_id,
                                                                            const std::vector<std::string>& ready_jobs) = 0;
+    virtual boost::asio::awaitable<bool> enqueue_ready_job_async(const workflow_identity& workflow_id, std::string& ready_job) = 0;
     virtual boost::asio::awaitable<bool> dequeue_ready_job_async(std::string& ready_job) = 0;
+    virtual boost::asio::awaitable<void> clear_ready_job_async() = 0;
     virtual boost::asio::awaitable<bool> set_job_runtime_async(const workflow_identity& workflow_id, const job_runtime_data& job_data) = 0;
     virtual boost::asio::awaitable<bool> fetch_job_runtime_async(
         const workflow_identity& workflow_id,
@@ -159,7 +161,9 @@ public:
         std::unordered_map<std::string, std::string>& workflow_data) const override;
     boost::asio::awaitable<bool> publish_workflow_ready_jobs_async(const workflow_identity& workflow_id, 
                                                                    const std::vector<std::string>& ready_jobs) override;
+    boost::asio::awaitable<bool> enqueue_ready_job_async(const workflow_identity& workflow_id, std::string& ready_job) override;
     boost::asio::awaitable<bool> dequeue_ready_job_async(std::string& ready_job) override;
+    boost::asio::awaitable<void> clear_ready_job_async() override;
 
     boost::asio::awaitable<bool> set_job_runtime_async(const workflow_identity& workflow_id, const job_runtime_data& job_data) override;
     boost::asio::awaitable<bool> fetch_job_runtime_async(

@@ -604,6 +604,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::set_workflow_runtime_async(cons
         {"creation_time", creation_time},
         {"last_update_time", creation_time}
     };
+
     co_return co_await execute_hset_command_async(workflow_key, fields);
 }
 
@@ -655,8 +656,34 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::publish_workflow_ready_jobs_asy
     co_return co_await execute_list_add_command_async("fp:ready_jobs", ready_jobs_keys);
 }
 
+boost::asio::awaitable<bool> RedisDatabaseAsync::enqueue_ready_job_async(const workflow_identity& workflow_id, std::string& ready_job) {
+    const auto job_key = make_job_key(workflow_id, ready_job);
+    co_return co_await execute_rpush_command_async("fp:ready_jobs", ready_job);
+}
+
 boost::asio::awaitable<bool> RedisDatabaseAsync::dequeue_ready_job_async(std::string& ready_job) {
-    co_return co_await execute_lpop_command_async("fp:ready_jobs", ready_job);
+    if (!co_await execute_lpop_command_async("fp:ready_jobs", ready_job)) {
+        co_return false;
+    }
+
+    size_t pos = ready_job.find_last_of(":");
+    if (pos == std::string::npos) {
+        Logger::get_logger()->error("dequeue_ready_job_async - Invalid ready_job key {} was dequeud", ready_job);
+        // Don't expose erroneous values
+        ready_job.clear();
+
+        co_return false;
+    }
+
+    ready_job = ready_job.substr(pos+1);
+
+    co_return true;
+}
+
+boost::asio::awaitable<void> RedisDatabaseAsync::clear_ready_job_async() {
+    std::vector<std::string> args{"DEL", "fp:ready_jobs"};
+    long long value = 0;
+    co_await execute_integer_command_async(args, value);
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_runtime_async(const workflow_identity& workflow_id, const job_runtime_data& job_data) {
@@ -671,7 +698,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_runtime_async(const wor
         {"retry_delay_sec", std::to_string(job_data.retry_delay_sec)},
         {"retry_backoff_policy", job_data.retry_backoff_policy}
     };
-    
+
     if (!co_await execute_hset_command_async(job_key, fields)) {
         co_return false;
     }

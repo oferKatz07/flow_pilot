@@ -40,6 +40,7 @@ bool SQLiteDatabase::get_rate_limit_plans(std::unordered_map<std::string, RateLi
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
+
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         std::string plan_name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         RateLimitConfig cfg;
@@ -49,6 +50,7 @@ bool SQLiteDatabase::get_rate_limit_plans(std::unordered_map<std::string, RateLi
         cfg.window_sec = sqlite3_column_int(stmt, 3);
         rate_limit_plans.emplace(plan_name, cfg);
     }
+
     sqlite3_finalize(stmt);
     return true;
 }
@@ -327,7 +329,7 @@ bool SQLiteDatabase::add_request(const RequestData& request_data, StatusCodes& e
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        msg = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
+        msg = std::string("add_request - Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
         Logger::get_logger()->error(msg);
         if (stmt) sqlite3_finalize(stmt);
         error_status = StatusCodes::INTERNAL_DB_FAILURE;
@@ -394,29 +396,31 @@ bool SQLiteDatabase::add_request(const RequestData& request_data,
 
 bool SQLiteDatabase::update_request_status(const RequestData& request_data) {
     const char* sql = "UPDATE workflow_requests SET status = ?, reject_reason = ? WHERE client_id = ? AND request_id = ?;";
+    bool ret_val = true;
     sqlite3_stmt* stmt = nullptr;
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
-        if (stmt) sqlite3_finalize(stmt);
+        Logger::get_logger()->error("update_request_status - sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        if (stmt) {
+            sqlite3_finalize(stmt);
+        }
         return false;
     }
-
+    
     sqlite3_bind_int(stmt, 1, to_int(request_data.status));
     sqlite3_bind_text(stmt, 2, request_data.reject_reason.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, request_data.client_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 4, request_data.request_id.c_str(), -1, SQLITE_STATIC);
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
-        Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
-        sqlite3_finalize(stmt);
-        return false;
+        Logger::get_logger()->error("update_request_status - sqlite step failed: {}", sqlite3_errmsg(db_));
+        ret_val = false;
     }
 
     sqlite3_finalize(stmt);
-    
-    return true;
+
+    return ret_val;
 }
 
 bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const {
@@ -425,8 +429,10 @@ bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, s
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
-        if (stmt) sqlite3_finalize(stmt);
+        Logger::get_logger()->error("get_all_requests_for_client - sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        if (stmt) {
+            sqlite3_finalize(stmt);
+        }
         return false;
     }
     sqlite3_bind_text(stmt, 1, client_id.c_str(), -1, SQLITE_STATIC);
@@ -448,9 +454,11 @@ bool SQLiteDatabase::get_all_requests_for_client(const std::string& client_id, s
         rd.reject_reason = rr ? reinterpret_cast<const char*>(rr) : std::string();
         workflows.push_back(rd);
     }
+
     sqlite3_finalize(stmt);
     return true;
 }
+
 bool SQLiteDatabase:: add_workflow(const WorkflowfullData& workflow_data,
                                   StatusCodes& error_status) {
     const char* sql = "INSERT INTO workflows (client_id, workflow_id, workflow_type, version, status, total_jobs, \
@@ -461,7 +469,7 @@ bool SQLiteDatabase:: add_workflow(const WorkflowfullData& workflow_data,
 
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        std::string error_message = std::string("Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
+        std::string error_message = std::string("add_workflow - Failed to prepare SQLite statement: ") + sqlite3_errmsg(db_);
         Logger::get_logger()->error(error_message);
         error_status = StatusCodes::INTERNAL_DB_FAILURE;
         if (stmt) sqlite3_finalize(stmt);
@@ -482,10 +490,10 @@ bool SQLiteDatabase:: add_workflow(const WorkflowfullData& workflow_data,
     if (rc != SQLITE_DONE) {
         std::string msg;
         if (rc == SQLITE_CONSTRAINT) {
-            msg = std::string("Workflow ID already exists: workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id;
+            msg = std::string("add_workflow - Workflow ID already exists: workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id;
             error_status = StatusCodes::WORKFLOW_ID_EXISTS;
         } else {
-            msg = std::string("Failed to insert workflow (workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id + "): " + sqlite3_errmsg(db_);
+            msg = std::string("add_workflow - Failed to insert workflow (workflow id=") + workflow_data.info.workflow_id + " client_id=" + workflow_data.info.client_id + "): " + sqlite3_errmsg(db_);
             error_status = StatusCodes::INTERNAL_DB_FAILURE;
         }
         Logger::get_logger()->error(msg);
@@ -508,8 +516,11 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
         case WorkflowStatus::RUNNING:
             sql_cmd = "UPDATE workflows SET status = ?, started_at = ? WHERE client_id = ? AND workflow_id = ?;";
             break;
+        case WorkflowStatus::READY:
+            sql_cmd = "UPDATE workflows SET status = ?, ready_at = ? WHERE client_id = ? AND workflow_id = ?;";
+            break;
         default:
-            Logger::get_logger()->error("Invalid status for update: {}", to_int(status));
+            Logger::get_logger()->error("update_workflow_status - Invalid status for update: {}", to_int(status));
             return false; // Invalid status for update
     }
 
@@ -536,7 +547,7 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
 }
 
 bool SQLiteDatabase::get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const {
-    const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status FROM workflows WHERE status IN (?, ?);";
+    const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status, total_jobs FROM workflows WHERE status IN (?, ?);";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -560,21 +571,24 @@ bool SQLiteDatabase::get_all_active_workflows(std::vector<WorkflowfullData>& wor
         wd.workflow_type = wt ? reinterpret_cast<const char*>(wt) : std::string();
         wd.workflow_version = wv ? reinterpret_cast<const char*>(wv) : std::string();
         wd.status =from_int_to_WorkflowStatus(st);
+        wd.total_jobs = sqlite3_column_int(stmt, 5);
         workflows.push_back(std::move(wd));
     }
+    
     sqlite3_finalize(stmt);
     return true;
 }
 
 bool SQLiteDatabase::get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowfullData>& workflows) const {
-    const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status FROM workflows WHERE client_id = ?;";
+    const char* sql = "SELECT client_id, workflow_id, workflow_type, version, status, total_jobs FROM workflows WHERE client_id = ?;";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
-        Logger::get_logger()->error("sqlite prepare failed: {}", sqlite3_errmsg(db_));
+        Logger::get_logger()->error("get_all_workflows_for_client - sqlite prepare failed: {}", sqlite3_errmsg(db_));
         if (stmt) sqlite3_finalize(stmt);
         return false;
     }
+
     sqlite3_bind_text(stmt, 1, client_id.c_str(), -1, SQLITE_STATIC);
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
         WorkflowfullData wf;
@@ -588,8 +602,10 @@ bool SQLiteDatabase::get_all_workflows_for_client(const std::string& client_id, 
         wf.workflow_type = wt ? reinterpret_cast<const char*>(wt) : std::string();
         wf.workflow_version = wv ? reinterpret_cast<const char*>(wv) : std::string();
         wf.status = from_int_to_WorkflowStatus(st);
+        wf.total_jobs = sqlite3_column_int(stmt, 5);
         workflows.push_back(wf);
     }
+
     sqlite3_finalize(stmt);
     return true;
 }
@@ -1061,6 +1077,7 @@ void SQLiteDatabase::create_workflows_table() {
         "  total_jobs INTEGER NOT NULL,"
         "  received_at INTEGER NOT NULL,"
         "  started_at INTEGER,"
+        "  ready_at INTEGER,"
         "  completed_at INTEGER,"
         "  PRIMARY KEY (client_id, workflow_id),"
         "  FOREIGN KEY(client_id) REFERENCES clients(client_id)"
@@ -1117,5 +1134,20 @@ void SQLiteDatabase::execute_ddl_cmd(const char* ddl_cmd) {
         throw std::runtime_error("Failed to initialize DB schema: " + msg);
     }
 }
+
+// bool SQLiteDatabase::prepare_request(const char* sql, sqlite3_stmt** stmt) {
+//     bool ret_val = true;
+//     int rc = sqlite3_prepare_v2(db_, sql, -1, stmt, nullptr);
+//     if (rc != SQLITE_OK) {
+//         Logger::get_logger()->error("prepare_request - sqlite prepare failed: {}", sqlite3_errmsg(db_));
+//         if (*stmt) {
+//             sqlite3_finalize(*stmt);
+//         }
+
+//         ret_val = false;
+//     }
+
+//     return ret_val;
+// }
 
 } // namespace flow_pilot

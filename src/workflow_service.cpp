@@ -86,26 +86,27 @@ WorkflowAdmissionService::WorkflowAdmissionService(const std::string& schema_pat
         co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::VALIDATE_WORKFLOW, 
                                                     StatusCodes::JOB_POLICY_VIOLATION);
     }
+
     res = validate_workflow(workflow_data, client_config.policy_config, jobs_runtime_info, jobs_map, 
                             workflow_info, rejection_reason);
     if (!res) {
         co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::VALIDATE_WORKFLOW, 
                                                     rejection_reason);
     }
-    workflow_info.info = std::move(workflow_request_info);
 
+    workflow_info.info = std::move(workflow_request_info);
     res = co_await persist_workflow(workflow_info, jobs_map, client_config.policy_config.max_job_retries, 
                                     rejection_reason);
     if (!res) {
-        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::PERSIST_WORKFLOW, rejection_reason);
+        co_return co_await handle_request_rejection(result, workflow_info.info, ValidationStage::PERSIST_WORKFLOW, rejection_reason);
     }
 
     if (!co_await generate_workflow_runtime_data(workflow_data, client_config.policy_config, workflow_info, jobs_runtime_info, ready_jobs)) {
         rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
-        co_return co_await handle_request_rejection(result, workflow_request_info, ValidationStage::GENERATE_RUNTIME_DATA, rejection_reason);
+        co_return co_await handle_request_rejection(result, workflow_info.info, ValidationStage::GENERATE_RUNTIME_DATA, rejection_reason);
     }
 
-    co_return co_await handle_request_accepted(result, workflow_request_info);
+    co_return co_await handle_request_accepted(result, workflow_info.info);
 }
 
 bool WorkflowAdmissionService::parse_request(const std::string& body, json& workflow_data, 
@@ -390,13 +391,12 @@ awaitable<ValidationResult> WorkflowAdmissionService::handle_request_rejection(V
 }
 
 awaitable<ValidationResult> WorkflowAdmissionService::handle_request_accepted(ValidationResult& result, 
-                                                                     RequestData& request_info) {
+                                                                              RequestData& request_info) {
     request_info.status = RequestStatus::ADMITTED;
     request_info.reject_reason = error_msgs::WORKFLOW_ADMITTED;
 
     co_await update_redis_request_status(request_info);
 
-    // Update request status in the database
     co_await DBFactory::get().update_request_status_async(request_info);
 
     co_return result;
