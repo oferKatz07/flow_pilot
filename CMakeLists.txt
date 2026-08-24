@@ -43,7 +43,9 @@ endif()
 
 set(FLOW_PILOT_SOURCES
     src/logger.cpp
+    src/redis_command_executor.cpp
     src/redis_db_async.cpp
+    src/redis_keys.cpp
     src/sqlite_db.cpp
     src/db_factory.cpp
     src/async_db.cpp
@@ -53,6 +55,7 @@ set(FLOW_PILOT_SOURCES
     src/request_handlers.cpp
     src/http_server.cpp
     src/workflow_admission_service.cpp
+    src/scheduler.cpp
 )
 
 # Build a library from all project sources (exclude main.cpp)
@@ -84,6 +87,7 @@ target_compile_definitions(flow_pilot PRIVATE WORKFLOW_SCHEMA_PATH="${CMAKE_SOUR
 add_executable(flow_pilot_tests
     tests/workflow_validator_test.cpp
     tests/async_sqlite_db_test.cpp
+    tests/redis_db_async_validator_test.cpp
 )
 
 target_include_directories(flow_pilot_tests PRIVATE include)

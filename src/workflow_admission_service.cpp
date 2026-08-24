@@ -78,7 +78,7 @@ WorkflowAdmissionService::WorkflowAdmissionService(const std::string& schema_pat
 
     // Validate received workflow against client's policy plan and semantic correctness
     std::unordered_map<std::string, DagData> jobs_map;
-    std::unordered_map<std::string, job_runtime_data> jobs_runtime_info;
+    std::unordered_map<std::string, JobRuntimeData> jobs_runtime_info;
     std::vector<std::string> ready_jobs;
     WorkflowfullData workflow_info;
     res = get_jobs_runtime_info(workflow_data, client_config.policy_config, jobs_runtime_info, ready_jobs);
@@ -177,7 +177,7 @@ boost::asio::awaitable<bool> WorkflowAdmissionService::persist_request(const Req
 }
 
 bool WorkflowAdmissionService::validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
-                                        std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info, 
+                                        std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
                                         std::unordered_map<std::string, DagData>& jobs_map, 
                                         WorkflowfullData& workflow_info,
                                         StatusCodes& rejection_reason) {
@@ -303,7 +303,7 @@ bool WorkflowAdmissionService::validate_semantic(const json& data,
 }
 
 bool WorkflowAdmissionService::validate_dependencies(const json& data, 
-                                            std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info, 
+                                            std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
                                             std::unordered_map<std::string, DagData>& jobs_map, 
                                             StatusCodes& rejection_reason)
 {
@@ -420,9 +420,9 @@ awaitable<void> WorkflowAdmissionService::update_redis_request_status(const Requ
 
 boost::asio::awaitable<bool> WorkflowAdmissionService::generate_workflow_runtime_data(const json& workflow_data, const PolicyPlan& policy_config, 
                                                               const WorkflowfullData& workflow_info, 
-                                                              const std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info,
+                                                              const std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
                                                               const std::vector<std::string>& ready_jobs) {
-    workflow_runtime_info workflow_runtime;
+    WorkflowRuntimeInfo workflow_runtime;
     // Set the Workflow identity
     workflow_runtime.identity.client_id = workflow_info.info.client_id;
     workflow_runtime.identity.workflow_id = workflow_info.info.workflow_id;
@@ -488,10 +488,10 @@ boost::asio::awaitable<bool> WorkflowAdmissionService::generate_workflow_runtime
 
 bool WorkflowAdmissionService::get_jobs_runtime_info(const json& workflow_data, 
                                             const PolicyPlan& policy_config,
-                                            std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info,
+                                            std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
                                             std::vector<std::string>& ready_jobs) {
     for (const auto& job : workflow_data["jobs"]) {
-        job_runtime_data job_info;
+        JobRuntimeData job_info;
         job_info.job_id = job["job_id"].get<std::string>();
         job_info.remaining_dependencies = static_cast<int>(job.value("depends_on", json::array()).size());
         job_info.priority = job.value("priority", policy_config.max_job_priority);

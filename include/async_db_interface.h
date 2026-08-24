@@ -6,8 +6,9 @@
 #include <string>
 #include <vector>
 
+#include "database_models.h"
+#include "flow_pilot_error_msgs.h"
 #include "client_config.h"
-#include "db_interface.h"
 
 namespace flow_pilot {
 

@@ -6,7 +6,10 @@
 #pragma once
 
 #include <boost/asio/thread_pool.hpp>
+
 #include "async_db_interface.h"
+
+class IDatabase;
 
 namespace flow_pilot {
 

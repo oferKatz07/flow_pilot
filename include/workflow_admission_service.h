@@ -61,7 +61,7 @@ private:
     boost::asio::awaitable<bool> persist_request(const RequestData& request_info, const std::string& body, 
                                                  const ClientConfig& client_config, StatusCodes& rejection_reason);
     bool validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
-                           std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info, 
+                           std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
                            std::unordered_map<std::string, DagData>& jobs_map, 
                            WorkflowfullData& workflow_info, 
                            StatusCodes& rejection_reason);
@@ -76,7 +76,7 @@ private:
                            std::unordered_map<std::string, DagData>& jobs_map, 
                            StatusCodes& rejection_reason);
     bool validate_dependencies(const json& data, 
-                               std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info, 
+                               std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
                                std::unordered_map<std::string, DagData>& jobs_map, 
                                StatusCodes& rejection_reason);
     boost::asio::awaitable<ValidationResult> handle_request_rejection(ValidationResult& result, 
@@ -87,11 +87,11 @@ private:
                                                                      RequestData& request_info);
     boost::asio::awaitable<void> update_redis_request_status(const RequestData& request_info);
     boost::asio::awaitable<bool> generate_workflow_runtime_data(const json& workflow_data, const PolicyPlan& policy_config, const WorkflowfullData& workflow_info, 
-                                                              const std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info,
+                                                              const std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
                                                               const std::vector<std::string>& ready_jobs);
     bool get_jobs_runtime_info(const json& workflow_data, 
                                const PolicyPlan& policy_config,
-                               std::unordered_map<std::string, job_runtime_data>& jobs_runtime_info,
+                               std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
                                std::vector<std::string>& ready_jobs);                       
 
     static constexpr int DEFAULT_MAX_ACTIVE_WORKFLOWS = 10;

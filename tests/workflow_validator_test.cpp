@@ -12,11 +12,12 @@
 #include "config.h"
 #include "redis_db_async.h"
 #include "sqlite_db.h"
+#include "redis_test_utils.h"
 
 using namespace flow_pilot;
 using json = nlohmann::json;
 
-static boost::asio::io_context shared_redis_ioc;
+static boost::asio::io_context& shared_redis_ioc = flow_pilot::test::redis_ioc();
 
 static std::string generate_unique_id()
 {
@@ -67,6 +68,7 @@ protected:
     void SetUp() override {
         // Use an in-memory SQLite DB for test isolation and deterministic defaults
         Config::get().db_config().db_path = ":memory:";
+        Config::get().logger().output = LogOutput::CONSOLE_ONLY;
         Config::get().redis().host = "127.0.0.1";
         Config::get().redis().port = 6379;
         // Use the test client config manager for testing
@@ -77,7 +79,11 @@ protected:
         } catch (const std::exception& ex) {
             GTEST_SKIP() << "Redis is not available for WorkflowService tests: " << ex.what();
         }
-        std::string schema_path = "../" + Config::get().workflow().workflow_schema_path;
+#ifdef WORKFLOW_SCHEMA_PATH
+        std::string schema_path = WORKFLOW_SCHEMA_PATH;
+#else
+        std::string schema_path = Config::get().workflow().workflow_schema_path;
+#endif
         service = std::make_unique<WorkflowAdmissionService>(schema_path);
     }
 
@@ -346,7 +352,7 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     EXPECT_EQ(persisted_jobs[0].job_id, "job-1");
     EXPECT_EQ(persisted_jobs[0].status, JobStatus::READY);
 
-    workflow_identity identity{client_id, workflow_id};
+    WorkflowIdentity identity{client_id, workflow_id};
 
     std::unordered_map<std::string, std::string> workflow_runtime;
     ASSERT_TRUE(run_async(shared_redis_ioc,
@@ -354,11 +360,11 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     EXPECT_EQ(workflow_runtime["status"], std::string(to_string(WorkflowStatus::RUNNING)));
     EXPECT_EQ(workflow_runtime["pending_jobs"], "0");
 
-    std::unordered_map<std::string, std::string> job_runtime;
+    JobRuntimeData job_runtime;
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis->fetch_job_runtime_async(identity, "job-1", job_runtime)));
-    EXPECT_EQ(job_runtime["status"], std::string(to_string(JobStatus::READY)));
-    EXPECT_EQ(job_runtime["remaining_dependencies"], "0");
+    EXPECT_EQ(job_runtime.status, std::string(to_string(JobStatus::READY)));
+    EXPECT_EQ(job_runtime.remaining_dependencies, 0);
 
     std::vector<uint8_t> payload;
     ASSERT_TRUE(run_async(shared_redis_ioc,
@@ -366,8 +372,9 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     EXPECT_EQ(payload, first_payload);
 
     std::string ready_job_key;
+    size_t list_size;
     ASSERT_TRUE(run_async(shared_redis_ioc,
-                          redis->dequeue_ready_job_async(ready_job_key)));
+                          redis->dequeue_ready_job_async(identity, ready_job_key, "test-scheduler", list_size)));
     EXPECT_EQ(ready_job_key, "job-1");
 
     std::shared_ptr<RedisDatabaseAsync> redis_cleanup = RedisDatabaseAsync::get_instance();
@@ -382,6 +389,7 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
 }
 
 TEST(RedisDatabaseTest, InvalidConnectionStringFails) {
+    Config::get().logger().output = LogOutput::CONSOLE_ONLY;
     std::shared_ptr<RedisDatabaseAsync> redis;
     try {
         redis = RedisDatabaseAsync::init(shared_redis_ioc);
@@ -396,6 +404,7 @@ TEST(RedisDatabaseTest, InvalidConnectionStringFails) {
 class ActualRedisDatabaseTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        Config::get().logger().output = LogOutput::CONSOLE_ONLY;
         try {
             redis_ = RedisDatabaseAsync::init(shared_redis_ioc);
         } catch (const std::exception& ex) {
@@ -590,11 +599,11 @@ TEST_F(ActualRedisDatabaseTest, AdmitRequest_ExistingWorkflowIdIsIdempotent) {
 }
 
 TEST_F(ActualRedisDatabaseTest, WorkflowRuntimeCreateFetchAndUpdate) {
-    struct workflow_identity identiity;
+    struct WorkflowIdentity identiity;
     identiity.client_id = "runtime-client-" + generate_unique_id();
     identiity.workflow_id = "workflow-" + generate_unique_id();
 
-    struct workflow_runtime_data workflow_info;
+    struct WorkflowRuntimeData workflow_info;
     workflow_info.workflow_id = identiity.workflow_id;
     workflow_info.status = "READY";
     workflow_info.pending_jobs = 1;
@@ -631,7 +640,7 @@ TEST_F(ActualRedisDatabaseTest, WorkflowRuntimeCreateFetchAndUpdate) {
 }
 
 TEST_F(ActualRedisDatabaseTest, CreateWorkflowRuntimeDataBootstrapsWorkflowState) {
-    struct workflow_runtime_info workflow_info;
+    struct WorkflowRuntimeInfo workflow_info;
     // Setting identity data
     workflow_info.identity.client_id = "bootstrap-client-" + generate_unique_id();
     workflow_info.identity.workflow_id = "workflow-" + generate_unique_id();
@@ -643,7 +652,7 @@ TEST_F(ActualRedisDatabaseTest, CreateWorkflowRuntimeDataBootstrapsWorkflowState
     workflow_info.workflow.failed_jobs = 0;
 
     // Setting jobs data
-    job_runtime_data job1;
+    JobRuntimeData job1;
     job1.job_id = "job-a";
     job1.status = to_string(JobStatus::READY);
     job1.remaining_dependencies = 0;
@@ -655,7 +664,7 @@ TEST_F(ActualRedisDatabaseTest, CreateWorkflowRuntimeDataBootstrapsWorkflowState
     job1.retry_backoff_policy = "IMMEDIATE";
     job1.successors.push_back("job-b");
 
-    job_runtime_data job2;
+    JobRuntimeData job2;
     job2.job_id = "job-b";
     job2.status = to_string(JobStatus::PENDING);
     job2.remaining_dependencies = 1;
@@ -679,28 +688,28 @@ TEST_F(ActualRedisDatabaseTest, CreateWorkflowRuntimeDataBootstrapsWorkflowState
     EXPECT_EQ(workflow_data["status"], workflow_info.workflow.status);
     EXPECT_EQ(workflow_data["pending_jobs"], "1");
 
-    std::unordered_map<std::string, std::string> job_data;
+    JobRuntimeData job_data;
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis_->fetch_job_runtime_async(workflow_info.identity,
                                                          "job-a",
                                                          job_data)));
-    EXPECT_EQ(job_data["status"], job1.status);
-    EXPECT_EQ(job_data["remaining_dependencies"], std::to_string(job1.remaining_dependencies));
-    EXPECT_EQ(job_data["max_retries"], std::to_string(job1.max_retries));
-    EXPECT_EQ(job_data["current_retry_count"], std::to_string(job1.current_retry_count));
-    EXPECT_EQ(job_data["priority"], std::to_string(job1.priority));
-    EXPECT_EQ(job_data["retry_delay_sec"], std::to_string(job1.retry_delay_sec));
-    EXPECT_EQ(job_data["timeout_sec"], std::to_string(job1.timeout_sec));
-    EXPECT_EQ(job_data["retry_backoff_policy"], job1.retry_backoff_policy);
+    EXPECT_EQ(job_data.status, job1.status);
+    EXPECT_EQ(job_data.remaining_dependencies, job1.remaining_dependencies);
+    EXPECT_EQ(job_data.max_retries, job1.max_retries);
+    EXPECT_EQ(job_data.current_retry_count, job1.current_retry_count);
+    EXPECT_EQ(job_data.priority, job1.priority);
+    EXPECT_EQ(job_data.retry_delay_sec, job1.retry_delay_sec);
+    EXPECT_EQ(job_data.timeout_sec, job1.timeout_sec);
+    EXPECT_EQ(job_data.retry_backoff_policy, job1.retry_backoff_policy);
 }
 
 TEST_F(ActualRedisDatabaseTest, JobRuntimePayloadAndDependenciesRoundtrip) {
-    struct workflow_identity workflow_id;
+    struct WorkflowIdentity workflow_id;
     workflow_id.client_id = "job-client-" + generate_unique_id();
     workflow_id.workflow_id = "workflow-" + generate_unique_id();
     
     std::string job_id = "job-" + generate_unique_id();
-    struct job_runtime_data job_info;
+    struct JobRuntimeData job_info;
     job_info.job_id = job_id;
     job_info.status = to_string(JobStatus::PENDING);
     job_info.remaining_dependencies = 1;
@@ -714,19 +723,19 @@ TEST_F(ActualRedisDatabaseTest, JobRuntimePayloadAndDependenciesRoundtrip) {
     EXPECT_TRUE(run_async(shared_redis_ioc,
                           redis_->set_job_runtime_async(workflow_id, job_info)));
 
-    std::unordered_map<std::string, std::string> job_data;
+    JobRuntimeData job_data;
     EXPECT_TRUE(run_async(shared_redis_ioc,
                           redis_->fetch_job_runtime_async(workflow_id,
                                                          job_id,
                                                          job_data)));
-    EXPECT_EQ(job_data["status"], job_info.status);
-    EXPECT_EQ(job_data["remaining_dependencies"], std::to_string(job_info.remaining_dependencies));
-    EXPECT_EQ(job_data["max_retries"], std::to_string(job_info.max_retries));
-    EXPECT_EQ(job_data["current_retry_count"], std::to_string(job_info.current_retry_count));
-    EXPECT_EQ(job_data["priority"], std::to_string(job_info.priority));
-    EXPECT_EQ(job_data["retry_delay_sec"], std::to_string(job_info.retry_delay_sec));
-    EXPECT_EQ(job_data["timeout_sec"], std::to_string(job_info.timeout_sec));
-    EXPECT_EQ(job_data["retry_backoff_policy"], job_info.retry_backoff_policy);
+    EXPECT_EQ(job_data.status, job_info.status);
+    EXPECT_EQ(job_data.remaining_dependencies, job_info.remaining_dependencies);
+    EXPECT_EQ(job_data.max_retries, job_info.max_retries);
+    EXPECT_EQ(job_data.current_retry_count, job_info.current_retry_count);
+    EXPECT_EQ(job_data.priority, job_info.priority);
+    EXPECT_EQ(job_data.retry_delay_sec, job_info.retry_delay_sec);
+    EXPECT_EQ(job_data.timeout_sec, job_info.timeout_sec);
+    EXPECT_EQ(job_data.retry_backoff_policy, job_info.retry_backoff_policy);
 }
 
 int main(int argc, char **argv) {
