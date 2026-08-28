@@ -477,7 +477,7 @@ TEST_F(WorkflowAdmissionServiceTest, MultipleInitialReadyJobsWithIdenticalPriori
     WorkflowIdentity identity{client_id, workflow_id};
     std::unordered_map<std::string, std::string> runtime;
     ASSERT_TRUE(run_async(shared_redis_ioc, redis->fetch_workflow_runtime_async(identity, runtime)));
-    EXPECT_EQ(runtime["curr_queued_jobs"], "2");
+    EXPECT_EQ(runtime["reserved_execution_slots"], "2");
     EXPECT_EQ(zcard(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)), 2);
 
     cleanup_workflow_runtime(shared_redis_ioc, *redis, client_id, request_id, workflow_id,
@@ -499,7 +499,7 @@ TEST_F(WorkflowAdmissionServiceTest, MoreReadyJobsThanMaxConcurrentJobsSplitsExe
     WorkflowIdentity identity{client_id, workflow_id};
     std::unordered_map<std::string, std::string> runtime;
     ASSERT_TRUE(run_async(shared_redis_ioc, redis->fetch_workflow_runtime_async(identity, runtime)));
-    EXPECT_EQ(runtime["curr_queued_jobs"], "2");
+    EXPECT_EQ(runtime["reserved_execution_slots"], "2");
     EXPECT_EQ(runtime["pending_jobs"], "0");
     EXPECT_EQ(zcard(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)), 3);
 

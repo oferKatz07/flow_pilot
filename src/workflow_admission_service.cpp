@@ -447,7 +447,7 @@ boost::asio::awaitable<bool> WorkflowAdmissionService::generate_workflow_runtime
         ready_job_lis_size = ready_jobs.size() - queued_job_list_size;
     }
 
-    workflow_runtime.workflow.curr_queued_jobs = queued_job_list_size;
+    workflow_runtime.workflow.reserved_execution_slots = queued_job_list_size;
     workflow_runtime.jobs_queued_for_execution.reserve(queued_job_list_size);
     queued_jobs_list.reserve(queued_job_list_size);
     if (ready_job_lis_size > 0) {

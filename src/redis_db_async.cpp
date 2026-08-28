@@ -556,11 +556,11 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_acquire_job_slot_async(cons
         local workflow_key = KEYS[1]
         local status = redis.call('HGET', workflow_key, 'status') or 'UNKNOWN'
         if status == 'READY' or status == 'RUNNING' then
-            local running_jobs = tonumber(redis.call('HGET', workflow_key, 'curr_queued_jobs') or '0')
+            local running_jobs = tonumber(redis.call('HGET', workflow_key, 'reserved_execution_slots') or '0')
             local max_concurrent_jobs = tonumber(redis.call('HGET', workflow_key, 'max_concurrent_jobs'))
 
             if running_jobs < max_concurrent_jobs then
-                redis.call('HINCRBY', workflow_key, 'curr_queued_jobs', 1)
+                redis.call('HINCRBY', workflow_key, 'reserved_execution_slots', 1)
 
                 return {1, status}
             end
@@ -633,7 +633,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::set_workflow_runtime_async(cons
         {"status", workflow_data.status},
         {"total_jobs", std::to_string(workflow_data.total_jobs)},
         {"max_concurrent_jobs", std::to_string(workflow_data.max_concurrent_jobs)},
-        {"curr_queued_jobs", std::to_string(workflow_data.curr_queued_jobs)},
+        {"reserved_execution_slots", std::to_string(workflow_data.reserved_execution_slots)},
         {"pending_jobs", std::to_string(workflow_data.pending_jobs)},
         {"completed_jobs",std::to_string(0)},
         {"failed_jobs", std::to_string(0)},

@@ -43,7 +43,7 @@ struct WorkflowRuntimeData {
     std::string workflow_id;
     std::string status;
     int max_concurrent_jobs;
-    int curr_queued_jobs;
+    int reserved_execution_slots;
     int max_runtime_sec;
     int total_jobs;
     int pending_jobs;

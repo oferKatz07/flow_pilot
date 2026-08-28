@@ -10,7 +10,7 @@ The admission subsystem validates incoming workflows, enforces client policies a
 
 The scheduler then operates on the prepared runtime state in Redis. During normal execution, the scheduler does not access SQLite. Redis contains the runtime state required to schedule and execute jobs, while SQLite provides durable persistence and the basis for recovery.
 
-The current implementation has completed the workflow admission phase and is moving into the workflow execution phase, beginning with the scheduler.
+The workflow admission phase is complete. The current execution architecture uses an explicit READY → QUEUED → RUNNING lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, and durable execution timestamps/statuses in SQLite. Scheduler implementation is the current development phase.
 
 ---
 
@@ -66,11 +66,11 @@ The scheduler obtains all information required for normal execution from Redis.
 
 This provides a clean boundary between workflow admission and workflow execution and avoids introducing synchronous database access into the scheduler's execution path.
 
-### 6. Ready Jobs Are the Admission-to-Scheduler Boundary
+### 6. Execution-Eligible Jobs Are the Scheduler Boundary
 
-The `ready_jobs` Redis queue is the explicit interface between workflow admission/runtime initialization and the scheduler.
+The Redis `ready_jobs` sorted set is the scheduler-facing collection of execution-eligible jobs.
 
-A workflow becomes executable only after its runtime state has been prepared and its initially ready jobs have been placed into `ready_jobs`.
+A job is inserted into `ready_jobs` only after its dependencies are satisfied and the workflow has reserved an execution slot for it, transitioning the job to QUEUED.
 
 This ordering ensures that a scheduler can never observe a job before the runtime data required to execute that job has been created.
 
@@ -218,78 +218,120 @@ The admission subsystem is the only component responsible for taking a submitted
 
 # Admission-to-Execution Boundary
 
-After a workflow has successfully passed admission and has been durably persisted, the admission subsystem prepares the Redis runtime representation.
+After a workflow passes admission and is durably persisted, the admission subsystem prepares its Redis runtime representation.
 
-Runtime initialization includes the data required by the scheduler to execute the workflow without accessing SQLite.
-
-The runtime representation may include:
+The runtime representation contains the information required to manage and execute the workflow without requiring the scheduler to access SQLite:
 
 * Workflow runtime metadata.
 * Job runtime state.
-* Dependency information.
-* Successor information.
+* Dependency and successor information.
 * Job payloads.
-* Runtime counters.
-* Execution-related metadata.
+* Runtime counters and execution metadata.
 
-The initial jobs whose dependencies are already satisfied are identified as ready jobs.
+Jobs with no unresolved dependencies enter the **READY** state.
 
-Only after the required runtime data has been successfully created are the ready jobs placed into the Redis `ready_jobs` queue.
+A READY job does not consume workflow execution capacity. When an execution slot is available, the workflow reserves the slot and transitions a selected READY job to **QUEUED**.
 
-This ordering is intentional:
+```text
+reserved_execution_slots = QUEUED jobs + RUNNING jobs
+```
+
+QUEUED jobs are execution-eligible and are inserted into the Redis `ready_jobs` sorted set for scheduler dispatch.
+
+The initialization path is:
 
 ```text
 Persist workflow
        |
        v
-Create runtime data in Redis
+Create Redis runtime state
        |
        v
-Prepare dependency state
+Initialize dependency state
        |
        v
-Create initial ready jobs
+Dependencies satisfied
        |
        v
-Push ready jobs to ready_jobs
+     READY
+       |
+       | workflow execution slot available
+       v
+     QUEUED
        |
        v
-Scheduler may execute
+Insert into ready_jobs
+       |
+       v
+Scheduler dispatch
 ```
 
-The `ready_jobs` queue therefore acts as a synchronization boundary: a job appearing there implies that the runtime state required by the scheduler has already been prepared.
-
----
+This boundary separates workflow-specific execution eligibility from scheduling. The workflow runtime grants execution capacity; the scheduler prioritizes and dispatches jobs that have already been granted that capacity.
 
 # Scheduler
 
 The scheduler is the core component of the workflow execution subsystem.
 
-Its primary responsibility is to manage the execution of admitted jobs.
+Its primary responsibility is to select QUEUED jobs that have already been granted a workflow execution slot, prioritize them, and coordinate their dispatch into the worker/executor layer according to available worker capacity.
 
-The scheduler consumes jobs from the Redis `ready_jobs` queue and coordinates their execution according to the workflow runtime state.
+FlowPilot separates **dependency readiness**, **workflow execution eligibility**, and **actual execution**:
+
+```text
+PENDING
+   |
+   | dependencies satisfied
+   v
+ READY
+   |
+   | workflow reserves an execution slot
+   v
+ QUEUED
+   |
+   | worker fetches job
+   v
+ RUNNING
+   |
+   +------> SUCCESS
+   |
+   +------> FAILED
+   |
+   +------> CANCELED
+```
+
+A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be running. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry is returned to READY when its retry delay has elapsed.
 
 ## Scheduler Responsibilities
 
 The scheduler is responsible for:
 
-* Consuming ready jobs from `ready_jobs`.
-* Obtaining job runtime information from Redis.
-* Enforcing execution concurrency limits.
-* Dispatching jobs to workers/executors.
-* Tracking job execution state.
-* Handling job completion.
-* Handling job failure.
-* Applying retry policies.
-* Updating workflow runtime state.
-* Detecting newly satisfied dependencies.
-* Making successor jobs ready.
-* Completing workflows.
-* Handling workflow execution failures and compensation where applicable.
+* Consuming priority-ordered QUEUED jobs from the Redis scheduler-facing structure.
+* Obtaining job and workflow runtime information from Redis.
+* Treating QUEUED jobs as already admitted by the workflow for execution; the scheduler does not decide whether the workflow has a free execution slot.
+* Recording scheduler ownership for jobs it has reserved.
+* Maintaining a bounded local set of jobs waiting to be executed.
+* Dispatching QUEUED jobs to available workers/executors.
+* Transitioning a job to RUNNING only when a worker actually fetches it.
+* Starting the execution-time budget when the worker fetches the job, rather than when the scheduler reserves it.
+* Processing completion/failure events.
+* Advancing dependency state after successful completion.
+* Making newly eligible successor jobs READY.
+* Returning retry-eligible jobs to READY after their retry delay.
+* Completing or failing workflows according to their aggregate job state.
 
-The scheduler should remain independent of the HTTP and admission layers.
+The scheduler remains independent of the HTTP and workflow-admission layers.
 
----
+## Scheduler Local Scheduling State
+
+Redis remains the shared runtime authority, while each scheduler may maintain local structures optimized for efficient dispatch.
+
+The scheduler uses:
+
+* A bounded collection of jobs already reserved by the scheduler and waiting for worker capacity.
+* A priority-ordered local container for efficient selection of the next job to execute.
+* Scheduler identity stored in the job's `owned_by` field after a scheduler claims a QUEUED job. Workflow execution-slot reservation and scheduler ownership are separate concepts.
+
+Scheduler-local priority adjustments, such as future fairness/aging, do not modify the job's persisted priority in Redis or SQLite.
+
 
 # Scheduler Runtime Data Access
 
@@ -338,47 +380,41 @@ SQLite remains relevant for persistence and recovery, but is outside the schedul
 
 # Ready Jobs
 
-`ready_jobs` is the primary scheduler input queue.
+`ready_jobs` is the primary scheduler input structure and is implemented as a Redis sorted set ordered by job priority.
 
-A job is placed into `ready_jobs` when all conditions required for its execution have been satisfied.
+`ready_jobs` contains **QUEUED** jobs: jobs whose dependencies are satisfied and for which the workflow has reserved an execution slot.
 
-Initially, this is performed during workflow runtime initialization for jobs that have no unresolved dependencies.
-
-Later, completed jobs can cause successor jobs to become ready. Those jobs are then added to `ready_jobs`.
-
-Conceptually:
+The runtime transitions are:
 
 ```text
-Job A
-  |
-  v
-Job B
-  |
-  v
-Job C
+PENDING
+   |
+   | dependencies satisfied
+   v
+ READY
+   |
+   | workflow reserves execution slot
+   v
+ QUEUED  ---> inserted into ready_jobs
+   |
+   | worker fetches job
+   v
+ RUNNING
 ```
 
-Initially:
+The states have distinct meanings:
+
+* **READY** — dependencies are satisfied; no execution slot is reserved.
+* **QUEUED** — an execution slot is reserved; the job is eligible for scheduler/worker dispatch.
+* **RUNNING** — a worker has fetched the job and execution has started.
+
+Per-workflow concurrency is represented by:
 
 ```text
-ready_jobs = [A]
+reserved_execution_slots = QUEUED jobs + RUNNING jobs
 ```
 
-After A completes successfully:
-
-```text
-ready_jobs = [B]
-```
-
-After B completes successfully:
-
-```text
-ready_jobs = [C]
-```
-
-The scheduler therefore operates as a dependency-aware execution engine rather than as a simple FIFO worker queue.
-
----
+The slot is reserved on READY → QUEUED and released when the execution attempt completes or otherwise leaves the slot-consuming lifecycle.
 
 # Runtime State
 
@@ -399,66 +435,77 @@ Typical runtime information includes:
 | Execution counters       | Enforce workflow/runtime limits      |
 | Workflow execution state | Determine workflow progress          |
 
-The exact Redis key structure is an implementation detail and may evolve as the scheduler implementation progresses.
+The runtime model includes a global `ready_jobs` sorted set plus workflow/job runtime keys. Job runtime data includes status, dependency count, priority, retry information, timeout information, and scheduler ownership (`owned_by`). Successor relationships are stored separately so dependency advancement can be performed without querying SQLite.
+
+The Redis representation is optimized for runtime scheduling and recovery operations.
 
 ---
 
 # Dependency Scheduling
 
-FlowPilot represents workflows as DAGs.
+FlowPilot workflows are immutable DAGs validated during admission.
 
-During admission, the DAG is validated and guaranteed to be executable.
-
-During execution, the scheduler maintains runtime dependency state.
-
-When a job completes successfully, its successors are evaluated.
-
-For each successor:
+During execution, Redis maintains each job's remaining dependency count and successor relationships. When a job completes successfully, the remaining dependency count of each successor is updated.
 
 ```text
 dependency satisfied
         |
         v
-remaining dependencies == 0
+remaining_dependencies == 0
         |
         v
-job becomes READY
+      READY
+        |
+        | workflow execution slot available
+        v
+      QUEUED
         |
         v
-push to ready_jobs
+insert into ready_jobs
 ```
 
-This allows independent branches of a workflow to execute concurrently.
-
----
+Independent branches can therefore become READY concurrently, while the workflow's execution-slot limit controls how many are promoted to QUEUED.
 
 # Job Execution Lifecycle
 
-The scheduler manages the runtime lifecycle of jobs.
-
-A simplified lifecycle is:
+FlowPilot uses explicit execution states so that dependency waiting, scheduler queueing, and actual execution can be measured independently.
 
 ```text
-READY
-  |
-  v
-RUNNING
-  |
-  +---------> RETRY_PENDING
-  |                |
-  |                v
-  |              READY
-  |
-  +---------> COMPLETED
-  |
-  +---------> FAILED
+PENDING
+   |
+   | remaining_dependencies == 0
+   v
+ READY
+   |
+   | workflow reserves execution slot
+   v
+ QUEUED
+   |
+   | worker fetches job
+   v
+ RUNNING
+   |
+   +------> SUCCESS
+   |
+   +------> FAILED
+   |
+   +------> CANCELED
 ```
 
-The exact state machine will be refined during scheduler implementation.
+The current job states are:
 
-The important architectural principle is that job state transitions are represented in Redis runtime state.
+* `PENDING` — waiting for dependencies.
+* `READY` — dependencies are satisfied and the job is globally schedulable.
+* `QUEUED` — granted one of the workflow's execution slots and eligible for scheduler/worker dispatch.
+* `RUNNING` — fetched by a worker; execution timing starts here.
+* `SUCCESS` — completed successfully.
+* `FAILED` — execution failed with no further retry scheduled.
+* `CANCELED` — execution was canceled.
 
----
+Retry is modeled orthogonally to the state machine using the retry counter. A retry-eligible job returns to READY after the configured delay rather than entering a separate RETRYING state.
+
+SQLite persists the corresponding status transitions and timestamps. In particular, READY and QUEUED are kept distinct so future statistics can measure time spent dependency-ready, waiting for a workflow execution slot, queued for scheduler/worker dispatch, and actually running.
+
 
 # Worker / Executor Integration
 
@@ -475,7 +522,7 @@ The executor layer may eventually support:
 * Go-based workers.
 * Other worker implementations.
 
-The scheduler is therefore responsible for **when and whether a job executes**, while the executor is responsible for **how the job executes**.
+The workflow runtime determines whether a job is execution-eligible, the scheduler determines which eligible job is dispatched next, and the executor is responsible for **how the job executes**.
 
 Conceptually:
 
@@ -580,9 +627,7 @@ Redis runtime state
 Scheduler
 ```
 
-Recovery is a later execution-phase capability and is not required for the initial scheduler implementation.
-
-The initial scheduler can therefore focus on correct normal execution semantics before distributed recovery is introduced.
+Runtime reconstruction is part of the recovery architecture; distributed scheduler/node-failure recovery is planned for the distributed-orchestration phase.
 
 ---
 
@@ -622,16 +667,19 @@ FlowPilot supports multiple levels of concurrency control.
 
 Admission controls the number of workflows that may become active for a client.
 
-The scheduler controls job execution concurrency according to runtime and client policy.
+Workflow runtime admission controls per-workflow execution concurrency by granting execution slots to READY jobs. The scheduler operates only on jobs that have already been granted such a slot.
 
 The scheduler must therefore distinguish between:
 
-* Workflow-level concurrency.
-* Global job execution concurrency.
-* Client-level job concurrency.
-* Worker/executor capacity.
+* Workflow-level execution-slot capacity.
+* `reserved_execution_slots`, which counts both QUEUED and RUNNING jobs.
+* Jobs claimed by a scheduler but not yet running.
+* Global worker/executor capacity.
+* Client-level execution policy where applicable.
 
-The exact scheduling policy will be implemented and refined during the scheduler phase.
+A job becoming QUEUED is not equivalent to it becoming RUNNING. QUEUED means the workflow has reserved capacity for the job; RUNNING means a worker has actually fetched it. Therefore `reserved_execution_slots = QUEUED jobs + RUNNING jobs`, and the execution timeout starts only at RUNNING.
+
+The scheduler uses a bounded local queue and priority-ordered dispatch. Scheduler-local fairness mechanisms can be added without changing persisted job priority.
 
 ---
 
@@ -643,61 +691,61 @@ The admission subsystem is feature-complete.
 
 Implemented:
 
-* HTTP API.
-* Request routing.
-* JSON parsing.
-* JSON Schema validation.
-* Client validation.
-* Client policy enforcement.
+* HTTP API and request routing.
+* JSON parsing and JSON Schema validation.
+* Client validation and policy enforcement.
 * Request idempotency.
 * Redis admission control.
-* Rate limiting.
-* Concurrent workflow limits.
+* Rate limiting and concurrent-workflow limits.
 * Semantic workflow validation.
-* Dependency validation.
-* DAG validation.
-* SQLite persistence.
-* Durable request auditing.
-* Runtime initialization.
-* Initial ready-job preparation.
+* Dependency and DAG validation.
+* SQLite persistence and durable request auditing.
+* Redis runtime initialization.
+* Initial READY-job preparation.
 * Redis `ready_jobs` scheduler interface.
 * Unit testing.
 
 ## Phase 2 — Workflow Execution 🚧
 
-Current development phase.
+The execution model and persistence support have been refined in preparation for the scheduler implementation.
 
-Planned implementation order:
+Implemented/refined:
 
-1. Scheduler runtime abstraction.
-2. Redis runtime access.
-3. `ready_jobs` consumption.
-4. Job execution lifecycle.
-5. Execution concurrency control.
-6. Worker/executor abstraction.
-7. Job completion processing.
-8. Dependency advancement.
-9. Successor readiness.
-10. Workflow completion.
-11. Retry handling.
-12. Failure handling.
-13. Compensation handling.
-14. Execution monitoring.
+* Explicit `PENDING`, `READY`, `QUEUED`, `RUNNING`, `SUCCESS`, `FAILED`, and `CANCELED` job states.
+* Durable SQLite support for READY/QUEUED/RUNNING lifecycle transitions and execution timing.
+* Redis runtime representation for scheduler-visible job state.
+* Priority-aware `ready_jobs` sorted-set design.
+* Workflow execution-slot reservation tracked through `reserved_execution_slots`.
+* Scheduler ownership through `owned_by`, separate from workflow slot reservation.
+* Separation of scheduler queueing time from actual job execution time.
+* Retry semantics based on retry count rather than a separate RETRYING state.
+* Unit tests covering the updated persistence/state-transition behavior.
+
+Current scheduler implementation focus:
+
+1. Grant available workflow execution slots and transition eligible READY jobs to QUEUED.
+2. Insert QUEUED jobs into the priority-ordered `ready_jobs` sorted set.
+3. Claim QUEUED jobs and maintain bounded local scheduler state.
+4. Prioritize and dispatch QUEUED jobs to workers.
+5. Transition QUEUED → RUNNING when a worker fetches the job.
+6. Process completion and persist final status/timing.
+7. Advance dependencies and promote eligible successors through READY → QUEUED.
+8. Integrate delayed retry handling.
+9. Complete/fail workflows from aggregate job state.
 
 ## Phase 3 — Distributed Orchestration
 
 Planned:
 
-* Distributed scheduler coordination.
 * Multiple scheduler instances.
-* Recovery after process/node failure.
-* Redis runtime reconstruction.
+* Distributed scheduler coordination and dead-scheduler ownership recovery.
+* Redis runtime reconstruction after failure.
 * Horizontal worker scaling.
 * Remote worker execution.
 * Kubernetes integration.
 * Observability and operational tooling.
+* Optional fairness/priority-aging policies.
 
----
 
 # Architectural Boundary
 
@@ -715,7 +763,7 @@ The most important boundary in the current architecture is:
                     | Runtime     |
                     +------+------+
                            |
-                      ready_jobs
+          ready_jobs (QUEUED jobs, ZSET)
                            |
                     +------v------+
                     |  Scheduler  |
@@ -734,7 +782,7 @@ Admission answers:
 
 The scheduler answers:
 
-> **"Given the active runtime state, which jobs can execute now, and how should they be dispatched and progressed?"**
+> **"Given the jobs that workflows have already made eligible for execution, which QUEUED jobs should be claimed, prioritized, and dispatched next?"**
 
 This separation is central to FlowPilot's architecture.
 
