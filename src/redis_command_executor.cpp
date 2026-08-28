@@ -310,7 +310,7 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_enqueue_command_
             co_return true;
         }
     } catch (const std::exception& ex) {
-        Logger::get_logger()->error("Redis ZADD command failed: {}", ex.what());
+        Logger::get_logger()->error("execute_zset_enqueue_command_async - Redis ZADD command failed: {}", ex.what());
     }
     co_return false;
 }
@@ -323,6 +323,7 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_dequeue_command_
         auto reply = co_await execute_(args);
         if (reply.type == RedisReply::Type::Array) {
             if (reply.array_value.empty()) {
+                // Set is empty
                 member.clear();
                 co_return true;
             }
@@ -331,7 +332,7 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_dequeue_command_
             co_return true;
         }
     } catch (const std::exception& ex) {
-        Logger::get_logger()->error("Redis ZPOPMAX command failed: {}", ex.what());
+        Logger::get_logger()->error("execute_zset_dequeue_command_async - Redis ZPOPMAX command failed: {}", ex.what());
     }
     member.clear();
     co_return false;

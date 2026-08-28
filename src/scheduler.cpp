@@ -15,9 +15,8 @@ boost::asio::awaitable<void> scheduler::ready_job_event() {
         co_return;
     }
 
-    size_t ready_jos_num;
     auto redis_db = RedisDatabaseAsync::get_instance();
-    co_await redis_db->dequeue_ready_job_async(identity, ready_job, scheduler_uuid, ready_jos_num);
+    co_await redis_db->dequeue_job_for_execution_async(identity, ready_job, scheduler_uuid);
     // Validate the queue is not empty
     if (ready_job.empty()) {
         co_return;

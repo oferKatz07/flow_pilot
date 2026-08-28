@@ -44,7 +44,7 @@ public:
         std::vector<RequestData>& requests) const override;
 
     boost::asio::awaitable<bool> add_workflow_async(
-        const WorkflowfullData& workflow_data,
+        const WorkflowData& workflow_data,
         StatusCodes& error_status) override;
 
     boost::asio::awaitable<bool> update_workflow_status_async(
@@ -53,11 +53,11 @@ public:
         const WorkflowStatus status) override;
 
     boost::asio::awaitable<bool> get_all_active_workflows_async(
-        std::vector<WorkflowfullData>& workflows) const override;
+        std::vector<WorkflowData>& workflows) const override;
 
     boost::asio::awaitable<bool> get_all_workflows_for_client_async(
         const std::string& client_id,
-        std::vector<WorkflowfullData>& workflows) const override;
+        std::vector<WorkflowData>& workflows) const override;
 
     boost::asio::awaitable<bool> fail_workflow_async(
         const std::string& client_id,
@@ -70,7 +70,8 @@ public:
     boost::asio::awaitable<bool> update_ready_jobs_async(
         const std::string& client_id,
         const std::string& workflow_id,
-        const std::vector<std::string>& job_ids) override;
+        const std::vector<std::string>& queued_job_ids,
+        const std::vector<std::string>& ready_job_ids) override;
 
 private:
     explicit AsyncDatabase();

@@ -78,15 +78,15 @@ public:
     bool get_all_requests_for_client(const std::string& client_id, std::vector<RequestData>& workflows) const;
 
     bool add_workflow(
-        const WorkflowfullData& workflow_data,
+        const WorkflowData& workflow_data,
         StatusCodes& error_status
     ) override;
 
     bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const WorkflowStatus status) override;
     
-    bool get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const override;
+    bool get_all_active_workflows(std::vector<WorkflowData>& workflows) const override;
 
-    bool get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowfullData>& workflows) const override;
+    bool get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowData>& workflows) const override;
 
     bool fail_workflow(const std::string& client_id, const std::string& workflow_id) override;
 
@@ -102,7 +102,8 @@ public:
                       const std::string& job_id, WorkflowJob& job_data) const override;
 
     bool update_ready_jobs(const std::string& client_id, const std::string& workflow_id, 
-                           const std::vector<std::string>& jobs) override;
+                           const std::vector<std::string>& queued_jobs,
+                           const std::vector<std::string>& ready_jobs) override;
 
     bool update_job_status(const std::string& client_id, const std::string& workflow_id, 
                            const std::string& job_id, const JobStatus status) override;

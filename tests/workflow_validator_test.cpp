@@ -6,6 +6,7 @@
 #include <random>
 #include <memory>
 #include <unordered_map>
+#include <algorithm>
 
 #include "flow_pilot_error_msgs.h"
 #include "workflow_admission_service.h"
@@ -61,6 +62,73 @@ static json make_valid_workflow()
     workflow["jobs"] = json::array({job});
 
     return workflow;
+}
+
+static json make_runtime_workflow(const std::string& client_id,
+                                  const std::string& workflow_id,
+                                  int ready_jobs,
+                                  int dependent_jobs = 0,
+                                  int priority = 5)
+{
+    json workflow;
+    workflow["request_id"] = "req-" + generate_unique_id();
+    workflow["client_id"] = client_id;
+    workflow["workflow_id"] = workflow_id;
+    workflow["workflow_type"] = "order_processing";
+    workflow["jobs"] = json::array();
+
+    for (int i = 0; i < ready_jobs; ++i) {
+        json job;
+        job["job_id"] = "ready-" + std::to_string(i);
+        job["type"] = "reserve_inventory";
+        job["priority"] = priority;
+        job["payload"] = std::vector<uint8_t>{static_cast<uint8_t>(i)};
+        workflow["jobs"].push_back(job);
+    }
+
+    for (int i = 0; i < dependent_jobs; ++i) {
+        json job;
+        job["job_id"] = "pending-" + std::to_string(i);
+        job["type"] = "reserve_inventory";
+        job["depends_on"] = json::array({"ready-0"});
+        job["priority"] = priority;
+        job["payload"] = std::vector<uint8_t>{static_cast<uint8_t>(ready_jobs + i)};
+        workflow["jobs"].push_back(job);
+    }
+
+    return workflow;
+}
+
+static std::unordered_map<JobStatus, int> count_job_statuses(const std::vector<WorkflowJob>& jobs)
+{
+    std::unordered_map<JobStatus, int> counts;
+    for (const auto& job : jobs) {
+        ++counts[job.status];
+    }
+    return counts;
+}
+
+static long long zcard(boost::asio::io_context& ioc, RedisDatabaseAsync& redis, const std::string& key)
+{
+    long long count = 0;
+    std::vector<std::string> args{"ZCARD", key};
+    EXPECT_TRUE(run_async(ioc, redis.command_executor().execute_integer_command_async(args, count)));
+    return count;
+}
+
+static void cleanup_workflow_runtime(boost::asio::io_context& ioc,
+                                     RedisDatabaseAsync& redis,
+                                     const std::string& client_id,
+                                     const std::string& request_id,
+                                     const std::string& workflow_id,
+                                     const std::vector<std::string>& payload_jobs)
+{
+    WorkflowIdentity identity{client_id, workflow_id};
+    run_async(ioc, redis.remove_active_workflow_async(client_id, workflow_id));
+    run_async(ioc, redis.release_request_id_async(client_id, request_id));
+    run_async(ioc, redis.delete_workflow_runtime_async(identity));
+    run_async(ioc, redis.delete_workflow_waiting_ready_jobs(identity));
+    run_async(ioc, redis.delete_all_jobs_payload_async(identity, payload_jobs));
 }
 
 class WorkflowAdmissionServiceTest : public ::testing::Test {
@@ -322,7 +390,7 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     // Make sure the ready job list is empty
     auto redis = RedisDatabaseAsync::get_instance();
     run_async(shared_redis_ioc,
-              redis->clear_ready_job_async());
+              redis->clear_execution_queue_async());
 
     const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
     EXPECT_TRUE(result.valid);
@@ -339,7 +407,7 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     EXPECT_EQ(requests[0].workflow_id, workflow_id);
     EXPECT_EQ(requests[0].status, RequestStatus::ADMITTED);
 
-    std::vector<WorkflowfullData> workflows;
+    std::vector<WorkflowData> workflows;
     ASSERT_TRUE(db.get_all_workflows_for_client(client_id, workflows));
     ASSERT_EQ(workflows.size(), 1u);
     EXPECT_EQ(workflows[0].info.workflow_id, workflow_id);
@@ -350,20 +418,20 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     ASSERT_TRUE(db.get_all_jobs_for_workflow(client_id, workflow_id, persisted_jobs));
     ASSERT_EQ(persisted_jobs.size(), 1u);
     EXPECT_EQ(persisted_jobs[0].job_id, "job-1");
-    EXPECT_EQ(persisted_jobs[0].status, JobStatus::READY);
+    EXPECT_EQ(persisted_jobs[0].status, JobStatus::QUEUED);
 
     WorkflowIdentity identity{client_id, workflow_id};
 
     std::unordered_map<std::string, std::string> workflow_runtime;
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis->fetch_workflow_runtime_async(identity, workflow_runtime)));
-    EXPECT_EQ(workflow_runtime["status"], std::string(to_string(WorkflowStatus::RUNNING)));
+    EXPECT_EQ(workflow_runtime["status"], std::string(to_string(WorkflowStatus::READY)));
     EXPECT_EQ(workflow_runtime["pending_jobs"], "0");
 
     JobRuntimeData job_runtime;
     ASSERT_TRUE(run_async(shared_redis_ioc,
                           redis->fetch_job_runtime_async(identity, "job-1", job_runtime)));
-    EXPECT_EQ(job_runtime.status, std::string(to_string(JobStatus::READY)));
+    EXPECT_EQ(job_runtime.status, std::string(to_string(JobStatus::QUEUED)));
     EXPECT_EQ(job_runtime.remaining_dependencies, 0);
 
     std::vector<uint8_t> payload;
@@ -372,9 +440,8 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     EXPECT_EQ(payload, first_payload);
 
     std::string ready_job_key;
-    size_t list_size;
     ASSERT_TRUE(run_async(shared_redis_ioc,
-                          redis->dequeue_ready_job_async(identity, ready_job_key, "test-scheduler", list_size)));
+                          redis->dequeue_job_for_execution_async(identity, ready_job_key, "test-scheduler")));
     EXPECT_EQ(ready_job_key, "job-1");
 
     std::shared_ptr<RedisDatabaseAsync> redis_cleanup = RedisDatabaseAsync::get_instance();
@@ -386,6 +453,135 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
                           redis_cleanup->delete_workflow_runtime_async(identity)));
     EXPECT_TRUE(run_async(shared_redis_ioc,
                           redis_cleanup->delete_job_payload_async(identity, "job-1")));
+}
+
+TEST_F(WorkflowAdmissionServiceTest, MultipleInitialReadyJobsWithIdenticalPrioritiesAreQueuedUpToLimit) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    run_async(shared_redis_ioc, redis->clear_execution_queue_async());
+
+    const std::string client_id = "client-equal-priority-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+    json workflow = make_runtime_workflow(client_id, workflow_id, 4, 0, 3);
+    const std::string request_id = workflow["request_id"].get<std::string>();
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    ASSERT_TRUE(result.valid) << result.errors_msg;
+
+    std::vector<WorkflowJob> jobs;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_jobs_for_workflow(client_id, workflow_id, jobs));
+    ASSERT_EQ(jobs.size(), 4u);
+    const auto counts = count_job_statuses(jobs);
+    EXPECT_EQ(counts.at(JobStatus::QUEUED), 2);
+    EXPECT_EQ(counts.at(JobStatus::READY), 2);
+
+    WorkflowIdentity identity{client_id, workflow_id};
+    std::unordered_map<std::string, std::string> runtime;
+    ASSERT_TRUE(run_async(shared_redis_ioc, redis->fetch_workflow_runtime_async(identity, runtime)));
+    EXPECT_EQ(runtime["curr_queued_jobs"], "2");
+    EXPECT_EQ(zcard(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)), 2);
+
+    cleanup_workflow_runtime(shared_redis_ioc, *redis, client_id, request_id, workflow_id,
+                             {"ready-0", "ready-1", "ready-2", "ready-3"});
+}
+
+TEST_F(WorkflowAdmissionServiceTest, MoreReadyJobsThanMaxConcurrentJobsSplitsExecutionAndWaitingQueues) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    run_async(shared_redis_ioc, redis->clear_execution_queue_async());
+
+    const std::string client_id = "client-more-ready-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+    json workflow = make_runtime_workflow(client_id, workflow_id, 5, 0, 4);
+    const std::string request_id = workflow["request_id"].get<std::string>();
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    ASSERT_TRUE(result.valid) << result.errors_msg;
+
+    WorkflowIdentity identity{client_id, workflow_id};
+    std::unordered_map<std::string, std::string> runtime;
+    ASSERT_TRUE(run_async(shared_redis_ioc, redis->fetch_workflow_runtime_async(identity, runtime)));
+    EXPECT_EQ(runtime["curr_queued_jobs"], "2");
+    EXPECT_EQ(runtime["pending_jobs"], "0");
+    EXPECT_EQ(zcard(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)), 3);
+
+    std::vector<std::string> dequeued;
+    for (int i = 0; i < 2; ++i) {
+        WorkflowIdentity dequeued_identity;
+        std::string job_id;
+        ASSERT_TRUE(run_async(shared_redis_ioc,
+                              redis->dequeue_job_for_execution_async(dequeued_identity, job_id, "scheduler-more")));
+        EXPECT_EQ(dequeued_identity.client_id, client_id);
+        EXPECT_EQ(dequeued_identity.workflow_id, workflow_id);
+        dequeued.push_back(job_id);
+    }
+    WorkflowIdentity empty_identity;
+    std::string empty_job;
+    EXPECT_FALSE(run_async(shared_redis_ioc,
+                           redis->dequeue_job_for_execution_async(empty_identity, empty_job, "scheduler-more")));
+
+    cleanup_workflow_runtime(shared_redis_ioc, *redis, client_id, request_id, workflow_id,
+                             {"ready-0", "ready-1", "ready-2", "ready-3", "ready-4"});
+}
+
+TEST_F(WorkflowAdmissionServiceTest, FewerReadyJobsThanMaxConcurrentJobsDoesNotCreateWaitingReadyQueue) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    run_async(shared_redis_ioc, redis->clear_execution_queue_async());
+
+    const std::string client_id = "client-fewer-ready-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+    json workflow = make_runtime_workflow(client_id, workflow_id, 1, 2, 4);
+    const std::string request_id = workflow["request_id"].get<std::string>();
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    ASSERT_TRUE(result.valid) << result.errors_msg;
+
+    std::vector<WorkflowJob> jobs;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_jobs_for_workflow(client_id, workflow_id, jobs));
+    ASSERT_EQ(jobs.size(), 3u);
+    const auto counts = count_job_statuses(jobs);
+    EXPECT_EQ(counts.at(JobStatus::QUEUED), 1);
+    EXPECT_EQ(counts.at(JobStatus::PENDING), 2);
+    EXPECT_EQ(counts.find(JobStatus::READY), counts.end());
+
+    WorkflowIdentity identity{client_id, workflow_id};
+    EXPECT_EQ(zcard(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)), 0);
+
+    cleanup_workflow_runtime(shared_redis_ioc, *redis, client_id, request_id, workflow_id,
+                             {"ready-0", "pending-0", "pending-1"});
+}
+
+TEST_F(WorkflowAdmissionServiceTest, CyclicWorkflowHasNoInitiallyReadyJobsAndIsRejectedBeforeRuntimeCreation) {
+    const std::string client_id = "client-zero-ready-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+
+    json workflow;
+    workflow["request_id"] = "req-" + generate_unique_id();
+    workflow["client_id"] = client_id;
+    workflow["workflow_id"] = workflow_id;
+    workflow["workflow_type"] = "order_processing";
+    workflow["jobs"] = json::array();
+
+    json job_a;
+    job_a["job_id"] = "a";
+    job_a["type"] = "reserve_inventory";
+    job_a["depends_on"] = json::array({"b"});
+    job_a["payload"] = std::vector<uint8_t>{1};
+    json job_b;
+    job_b["job_id"] = "b";
+    job_b["type"] = "reserve_inventory";
+    job_b["depends_on"] = json::array({"a"});
+    job_b["payload"] = std::vector<uint8_t>{2};
+    workflow["jobs"].push_back(job_a);
+    workflow["jobs"].push_back(job_b);
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.status_code, StatusCodes::CIRCULAR_DEPENDENCY);
+
+    WorkflowIdentity identity{client_id, workflow_id};
+    std::unordered_map<std::string, std::string> runtime;
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          RedisDatabaseAsync::get_instance()->fetch_workflow_runtime_async(identity, runtime)));
+    EXPECT_TRUE(runtime.empty());
 }
 
 TEST(RedisDatabaseTest, InvalidConnectionStringFails) {

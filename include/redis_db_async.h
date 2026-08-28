@@ -3,8 +3,10 @@
 
 #pragma once
 
-#include <boost/asio/awaitable.hpp>
+#include <set>
 #include <unordered_map>
+#include <boost/asio/awaitable.hpp>
+#include <boost/uuid/uuid.hpp>
 
 #include "redis_base.h"
 #include "redis_command_executor.h"
@@ -12,6 +14,25 @@
 #include "flow_pilot_error_msgs.h"
 
 namespace flow_pilot {
+
+struct PrioritizedJob {
+    std::string job_id;
+    boost::uuids::uuid job_uuid;
+    int priority;
+};
+
+struct JobPriorityComparator {
+    bool operator()(const PrioritizedJob lhs,
+                    const PrioritizedJob rhs) const {
+        if (lhs.priority != rhs.priority) {
+            return lhs.priority > rhs.priority;
+        }
+
+        return lhs.job_uuid < rhs.job_uuid;
+    }
+};
+
+using JobPriorityQueue = std::set<PrioritizedJob, JobPriorityComparator>;
 
 struct WorkflowIdentity {
     std::string client_id;
@@ -22,6 +43,7 @@ struct WorkflowRuntimeData {
     std::string workflow_id;
     std::string status;
     int max_concurrent_jobs;
+    int curr_queued_jobs;
     int max_runtime_sec;
     int total_jobs;
     int pending_jobs;
@@ -30,6 +52,7 @@ struct WorkflowRuntimeData {
 };
 
 struct JobRuntimeData {
+    boost::uuids::uuid job_uuid;
     std::string job_id;
     std::string status;
     int remaining_dependencies;
@@ -42,13 +65,16 @@ struct JobRuntimeData {
     std::vector<std::string> successors;
 };
 
-using workflow_jobs_list = std::vector<JobRuntimeData>;
+using WorkflowJobsList = std::vector<JobRuntimeData>;
+using PrioritizedJobsList = std::vector<PrioritizedJob>;
 
 struct WorkflowRuntimeInfo
 {
     WorkflowIdentity identity;
     WorkflowRuntimeData workflow;
-    workflow_jobs_list jobs;
+    WorkflowJobsList jobs;
+    PrioritizedJobsList ready_job_list;
+    PrioritizedJobsList jobs_queued_for_execution;
 };
 
 struct InMemoryDBConfig;
@@ -94,12 +120,16 @@ public:
         const std::unordered_map<std::string, std::string>& fields) = 0;
     virtual boost::asio::awaitable<bool> fetch_workflow_runtime_async(const WorkflowIdentity& workflow_id,
                                                                       std::unordered_map<std::string, std::string>& workflow_data) const = 0;
-    virtual boost::asio::awaitable<bool> publish_workflow_ready_jobs_async(const WorkflowIdentity& workflow_id,
-                                                                           const std::vector<std::string>& ready_jobs) = 0;
-    virtual boost::asio::awaitable<bool> enqueue_ready_job_async(const WorkflowIdentity& workflow_id, std::string& ready_job) = 0;
-    virtual boost::asio::awaitable<bool> dequeue_ready_job_async(WorkflowIdentity& workflow_id, std::string& ready_job,
-                                                                 const std::string& scheduler_id, size_t& list_size) = 0;
-    virtual boost::asio::awaitable<void> clear_ready_job_async() = 0;
+    virtual boost::asio::awaitable<bool> create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
+                                                                            const PrioritizedJobsList& ready_jobs) = 0;
+    virtual boost::asio::awaitable<bool> delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) = 0;
+    virtual boost::asio::awaitable<bool> queue_workflow_jobs_for_execution_async(const WorkflowIdentity& workflow_id,
+                                                                                 const PrioritizedJobsList& queued_jobs) = 0;
+    virtual boost::asio::awaitable<bool> enqueue_job_for_execution_async(const WorkflowIdentity& workflow_id, 
+                                                                         const PrioritizedJob& ready_job) = 0;
+    virtual boost::asio::awaitable<bool> dequeue_job_for_execution_async(WorkflowIdentity& workflow_id, std::string& ready_job,
+                                                                         const std::string& scheduler_id) = 0;
+    virtual boost::asio::awaitable<void> clear_execution_queue_async() = 0;
     virtual boost::asio::awaitable<bool> set_job_runtime_async(const WorkflowIdentity& workflow_id, const JobRuntimeData& job_data) = 0;
     virtual boost::asio::awaitable<bool> fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
                                                                  const std::string& job_id,
@@ -112,7 +142,7 @@ public:
                                                                  std::vector<uint8_t>& payload) const = 0;
     virtual boost::asio::awaitable<bool> delete_workflow_runtime_async(const WorkflowIdentity& workflow_id) = 0;
     virtual boost::asio::awaitable<bool> delete_all_workflow_jobs_async(const WorkflowIdentity& workflow_id, 
-                                                                        const workflow_jobs_list& jobs) = 0;
+                                                                        const WorkflowJobsList& jobs) = 0;
     virtual boost::asio::awaitable<bool> delete_job_payload_async(const WorkflowIdentity& workflow_id, const std::string& job_id) = 0;
     virtual boost::asio::awaitable<bool> delete_all_jobs_payload_async(const WorkflowIdentity& workflow_id, 
                                                                        const std::vector<std::string>& job_ids) = 0;
@@ -158,12 +188,16 @@ public:
                                                                const std::unordered_map<std::string, std::string>& fields) override;
     boost::asio::awaitable<bool> fetch_workflow_runtime_async(const WorkflowIdentity& workflow_id,
                                                               std::unordered_map<std::string, std::string>& workflow_data) const override;
-    boost::asio::awaitable<bool> publish_workflow_ready_jobs_async(const WorkflowIdentity& workflow_id, 
-                                                                   const std::vector<std::string>& ready_jobs) override;
-    boost::asio::awaitable<bool> enqueue_ready_job_async(const WorkflowIdentity& workflow_id, std::string& ready_job) override;
-    boost::asio::awaitable<bool> dequeue_ready_job_async(WorkflowIdentity& workflow_id, std::string& ready_job, 
-                                                         const std::string& scheduler_id, size_t& list_size) override;
-    boost::asio::awaitable<void> clear_ready_job_async() override;
+    boost::asio::awaitable<bool> create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
+                                                                    const PrioritizedJobsList& ready_jobs) override;
+    boost::asio::awaitable<bool> delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) override;
+    boost::asio::awaitable<bool> queue_workflow_jobs_for_execution_async(const WorkflowIdentity& workflow_id, 
+                                                                         const PrioritizedJobsList& queued_jobs) override;
+    boost::asio::awaitable<bool> enqueue_job_for_execution_async(const WorkflowIdentity& workflow_id, 
+                                                                 const PrioritizedJob& ready_job) override;
+    boost::asio::awaitable<bool> dequeue_job_for_execution_async(WorkflowIdentity& workflow_id, std::string& ready_job, 
+                                                                 const std::string& scheduler_id) override;
+    boost::asio::awaitable<void> clear_execution_queue_async() override;
     boost::asio::awaitable<bool> set_job_runtime_async(const WorkflowIdentity& workflow_id, const JobRuntimeData& job_data) override;
     boost::asio::awaitable<bool> fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
                                                          const std::string& job_id,
@@ -176,7 +210,7 @@ public:
                                                          std::vector<uint8_t>& payload) const override;
     boost::asio::awaitable<bool> delete_workflow_runtime_async(const WorkflowIdentity& workflow_id) override;
     boost::asio::awaitable<bool> delete_all_workflow_jobs_async(const WorkflowIdentity& workflow_id, 
-                                                                const workflow_jobs_list& jobs) override;
+                                                                const WorkflowJobsList& jobs) override;
     boost::asio::awaitable<bool> delete_job_payload_async(const WorkflowIdentity& workflow_id, const std::string& job_id) override;
     boost::asio::awaitable<bool> delete_all_jobs_payload_async(const WorkflowIdentity& workflow_id, 
                                                                const std::vector<std::string>& job_ids) override;

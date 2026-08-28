@@ -77,7 +77,7 @@ public:
 
     // Add a new workflow data to the DB. This is used for durability and auditing of workflow submissions.
     virtual bool add_workflow(
-        const WorkflowfullData& workflow_data,
+        const WorkflowData& workflow_data,
         StatusCodes& error_status
     ) = 0;
 
@@ -85,10 +85,10 @@ public:
     virtual bool update_workflow_status(const std::string& client_id, const std::string& workflow_id, const WorkflowStatus status) = 0;
 
     /// For recovery get all active workflows (with status RECEIVED, ADMITTED, RUNNING) from the DB.
-    virtual bool get_all_active_workflows(std::vector<WorkflowfullData>& workflows) const = 0;
+    virtual bool get_all_active_workflows(std::vector<WorkflowData>& workflows) const = 0;
 
     /// Get all workflows for the requested client from the DB. This is used for auditing and debugging purposes.
-    virtual bool get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowfullData>& workflows) const = 0;
+    virtual bool get_all_workflows_for_client(const std::string& client_id, std::vector<WorkflowData>& workflows) const = 0;
     
     // Set all pending workflow jobs status (job with status PENDING and READY) to FAILED
     virtual bool fail_workflow(const std::string& client_id, const std::string& workflow_id) = 0;
@@ -103,7 +103,9 @@ public:
     ) = 0;
 
     // Update the workflow ready jobs in the DB
-    virtual bool update_ready_jobs(const std::string& client_id, const std::string& workflow_id, const std::vector<std::string>& jobs) = 0;
+    virtual bool update_ready_jobs(const std::string& client_id, const std::string& workflow_id, 
+                                   const std::vector<std::string>& queued_jobs,
+                                   const std::vector<std::string>& ready_jobs) = 0;
 
     // Update the job status for a specific job in a workflow
     virtual bool update_job_status(const std::string& client_id, const std::string& workflow_id, const std::string& job_id, 

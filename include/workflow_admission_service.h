@@ -62,12 +62,11 @@ private:
                                                  const ClientConfig& client_config, StatusCodes& rejection_reason);
     bool validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
                            std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
-                           std::unordered_map<std::string, DagData>& jobs_map, 
-                           WorkflowfullData& workflow_info, 
+                           WorkflowData& workflow_info, 
                            StatusCodes& rejection_reason);
-     boost::asio::awaitable<bool>  persist_workflow(const WorkflowfullData& workflow_info, 
-                                                    const std::unordered_map<std::string, DagData>& jobs_map,
-                                                    int policy_jobs_retry_num, 
+     boost::asio::awaitable<bool>  persist_workflow(const WorkflowData& workflow_info, 
+                                                    const std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
+                                                    const int policy_jobs_retry_num, 
                                                     StatusCodes& rejection_reason);
     bool validate_admission_client_workflow_policy(const json& workflow_data, 
                                                    const PolicyPlan& policy_config, 
@@ -86,13 +85,13 @@ private:
     boost::asio::awaitable<ValidationResult> handle_request_accepted(ValidationResult& result, 
                                                                      RequestData& request_info);
     boost::asio::awaitable<void> update_redis_request_status(const RequestData& request_info);
-    boost::asio::awaitable<bool> generate_workflow_runtime_data(const json& workflow_data, const PolicyPlan& policy_config, const WorkflowfullData& workflow_info, 
-                                                              const std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
-                                                              const std::vector<std::string>& ready_jobs);
+    boost::asio::awaitable<bool> generate_workflow_runtime_data(const json& workflow_data, const PolicyPlan& policy_config, const WorkflowData& workflow_info, 
+                                                                const JobPriorityQueue& ready_jobs,
+                                                                std::unordered_map<std::string,JobRuntimeData>& jobs_runtime_info);
     bool get_jobs_runtime_info(const json& workflow_data, 
                                const PolicyPlan& policy_config,
                                std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
-                               std::vector<std::string>& ready_jobs);                       
+                               JobPriorityQueue& ready_jobs);                       
 
     static constexpr int DEFAULT_MAX_ACTIVE_WORKFLOWS = 10;
     static constexpr int DEFAULT_RATE_REQUESTS = 3;

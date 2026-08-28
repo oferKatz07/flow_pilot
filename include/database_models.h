@@ -134,10 +134,11 @@ inline std::string_view to_string(WorkflowStatus status) noexcept{
 enum class JobStatus : uint8_t {
     PENDING = 0,
     READY = 1,
-    RUNNING = 2,
-    COMPLETED = 3,
-    FAILED = 4,
-    CANCELED = 5,
+    QUEUED = 2,
+    RUNNING = 3,
+    COMPLETED = 4,
+    FAILED = 5,
+    CANCELED = 6,
     // UNKNOWN must remain the last enumerator.
     // Values >= UNKNOWN are considered invalid.
     UNKNOWN
@@ -162,6 +163,7 @@ inline std::string_view to_string(JobStatus status) noexcept{
     switch(status) {
         case JobStatus::PENDING: return "PENDING";
         case JobStatus::READY: return "READY";
+        case JobStatus::QUEUED: return "QUEUED";
         case JobStatus::RUNNING: return "RUNNING";
         case JobStatus::COMPLETED: return "COMPLETED";
         case JobStatus::FAILED: return "FAILED";
@@ -199,13 +201,14 @@ struct RequestData {
     std::string reject_reason;
 };
 
-struct WorkflowfullData {
+struct WorkflowData {
     RequestData info;
     WorkflowStatus status;
     std::string workflow_type;
     std::string workflow_version;
     int total_jobs;
     std::time_t received_at;
+    std::time_t ready_at;
     std::time_t started_at;
     std::time_t completed_at;
 };
@@ -218,8 +221,10 @@ struct WorkflowJob {
     JobStatus status;
     int retry_num;
     std::time_t submitted_at;
+    std::time_t ready_at;
+    std::time_t queued_at;
     std::time_t started_at;
-    std::time_t updated_at;
+    std::time_t completed_at;
 };
 
 struct workflow_payload_data {
@@ -243,4 +248,3 @@ struct WorkflowJobList {
 };
 
 } // namespace flow_pilot
-
