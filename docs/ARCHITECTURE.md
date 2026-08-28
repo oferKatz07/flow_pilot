@@ -68,9 +68,9 @@ This provides a clean boundary between workflow admission and workflow execution
 
 ### 6. Execution-Eligible Jobs Are the Scheduler Boundary
 
-The Redis `ready_jobs` sorted set is the scheduler-facing collection of execution-eligible jobs.
+The Redis `execution_queue` sorted set is the scheduler-facing collection of execution-eligible jobs.
 
-A job is inserted into `ready_jobs` only after its dependencies are satisfied and the workflow has reserved an execution slot for it, transitioning the job to QUEUED.
+A job is inserted into `execution_queue` only after its dependencies are satisfied and the workflow has reserved an execution slot for it, transitioning the job to QUEUED.
 
 This ordering ensures that a scheduler can never observe a job before the runtime data required to execute that job has been created.
 
@@ -132,7 +132,7 @@ Workflow admission and execution logic belong to dedicated services.
           | Runtime Data  |                    |   Persistence  |
           +-------+-------+                    +----------------+
                   |
-                  | ready_jobs
+                  | queued_jobs
                   v
           +----------------------+
           |      Scheduler       |
@@ -163,7 +163,7 @@ The important architectural boundary is:
                   v
              Redis runtime
                   |
-             ready_jobs
+             queued_jobs
                   |
                   v
               Scheduler
@@ -236,7 +236,7 @@ A READY job does not consume workflow execution capacity. When an execution slot
 reserved_execution_slots = QUEUED jobs + RUNNING jobs
 ```
 
-QUEUED jobs are execution-eligible and are inserted into the Redis `ready_jobs` sorted set for scheduler dispatch.
+QUEUED jobs are execution-eligible and are inserted into the Redis `execution_queue` sorted set for scheduler dispatch.
 
 The initialization path is:
 
@@ -260,7 +260,7 @@ Dependencies satisfied
      QUEUED
        |
        v
-Insert into ready_jobs
+Insert into execution_queue
        |
        v
 Scheduler dispatch
@@ -356,7 +356,7 @@ The runtime path is therefore:
 ```text
 Scheduler
     |
-    +--> ready_jobs
+    +--> queued_jobs
     |
     +--> workflow runtime
     |
@@ -380,9 +380,9 @@ SQLite remains relevant for persistence and recovery, but is outside the schedul
 
 # Ready Jobs
 
-`ready_jobs` is the primary scheduler input structure and is implemented as a Redis sorted set ordered by job priority.
+`execution_queue` is the primary scheduler input structure and is implemented as a Redis sorted set ordered by job priority.
 
-`ready_jobs` contains **QUEUED** jobs: jobs whose dependencies are satisfied and for which the workflow has reserved an execution slot.
+`execution_queue` contains **QUEUED** jobs: jobs whose dependencies are satisfied and for which the workflow has reserved an execution slot.
 
 The runtime transitions are:
 
@@ -395,7 +395,7 @@ PENDING
    |
    | workflow reserves execution slot
    v
- QUEUED  ---> inserted into ready_jobs
+ QUEUED  ---> inserted into execution_queue
    |
    | worker fetches job
    v
@@ -435,7 +435,7 @@ Typical runtime information includes:
 | Execution counters       | Enforce workflow/runtime limits      |
 | Workflow execution state | Determine workflow progress          |
 
-The runtime model includes a global `ready_jobs` sorted set plus workflow/job runtime keys. Job runtime data includes status, dependency count, priority, retry information, timeout information, and scheduler ownership (`owned_by`). Successor relationships are stored separately so dependency advancement can be performed without querying SQLite.
+The runtime model includes a global `execution_queue` sorted set plus workflow/job runtime keys. Job runtime data includes status, dependency count, priority, retry information, timeout information, and scheduler ownership (`owned_by`). Successor relationships are stored separately so dependency advancement can be performed without querying SQLite.
 
 The Redis representation is optimized for runtime scheduling and recovery operations.
 
@@ -461,7 +461,7 @@ remaining_dependencies == 0
       QUEUED
         |
         v
-insert into ready_jobs
+insert into execution_queue
 ```
 
 Independent branches can therefore become READY concurrently, while the workflow's execution-slot limit controls how many are promoted to QUEUED.
@@ -702,7 +702,7 @@ Implemented:
 * SQLite persistence and durable request auditing.
 * Redis runtime initialization.
 * Initial READY-job preparation.
-* Redis `ready_jobs` scheduler interface.
+* Redis `execution_queue` scheduler interface.
 * Unit testing.
 
 ## Phase 2 — Workflow Execution 🚧
@@ -714,7 +714,7 @@ Implemented/refined:
 * Explicit `PENDING`, `READY`, `QUEUED`, `RUNNING`, `SUCCESS`, `FAILED`, and `CANCELED` job states.
 * Durable SQLite support for READY/QUEUED/RUNNING lifecycle transitions and execution timing.
 * Redis runtime representation for scheduler-visible job state.
-* Priority-aware `ready_jobs` sorted-set design.
+* Priority-aware `execution_queue` sorted-set design.
 * Workflow execution-slot reservation tracked through `reserved_execution_slots`.
 * Scheduler ownership through `owned_by`, separate from workflow slot reservation.
 * Separation of scheduler queueing time from actual job execution time.
@@ -724,7 +724,7 @@ Implemented/refined:
 Current scheduler implementation focus:
 
 1. Grant available workflow execution slots and transition eligible READY jobs to QUEUED.
-2. Insert QUEUED jobs into the priority-ordered `ready_jobs` sorted set.
+2. Insert QUEUED jobs into the priority-ordered `execution_queue` sorted set.
 3. Claim QUEUED jobs and maintain bounded local scheduler state.
 4. Prioritize and dispatch QUEUED jobs to workers.
 5. Transition QUEUED → RUNNING when a worker fetches the job.
@@ -763,7 +763,7 @@ The most important boundary in the current architecture is:
                     | Runtime     |
                     +------+------+
                            |
-          ready_jobs (QUEUED jobs, ZSET)
+          execution_queue (QUEUED jobs, ZSET)
                            |
                     +------v------+
                     |  Scheduler  |
