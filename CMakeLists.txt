@@ -47,6 +47,7 @@ set(FLOW_PILOT_SOURCES
     src/redis_db_async.cpp
     src/redis_keys.cpp
     src/sqlite_db.cpp
+    src/admission_failure_handler.cpp
     src/db_factory.cpp
     src/async_db.cpp
     src/client_sqlite_config_manager.cpp
@@ -54,6 +55,7 @@ set(FLOW_PILOT_SOURCES
     src/client_config_manager_factory.cpp
     src/request_handlers.cpp
     src/http_server.cpp
+    src/workflow_runtime_generator.cpp
     src/workflow_admission_service.cpp
     src/scheduler.cpp
 )

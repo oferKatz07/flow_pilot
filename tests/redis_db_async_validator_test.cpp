@@ -63,6 +63,36 @@ static JobRuntimeData make_job_runtime(const std::string& job_id,
     return job;
 }
 
+TEST(RedisCommandExecutorTest, ZsetRemoveBuildsZremCommand)
+{
+    boost::asio::io_context ioc;
+    std::vector<std::string> observed_args;
+    RedisCommandExecutor executor(
+        [&observed_args](const std::vector<std::string>& args) -> boost::asio::awaitable<RedisReply> {
+            observed_args = args;
+            co_return RedisReply{RedisReply::Type::Integer, "", 2, {}};
+        });
+
+    ASSERT_TRUE(run_async(ioc, executor.execute_zset_remove_command_async("queue", {"job-a", "job-b"})));
+
+    const std::vector<std::string> expected_args{"ZREM", "queue", "job-a", "job-b"};
+    EXPECT_EQ(observed_args, expected_args);
+}
+
+TEST(RedisCommandExecutorTest, ZsetRemoveSkipsEmptyMemberList)
+{
+    boost::asio::io_context ioc;
+    bool executed = false;
+    RedisCommandExecutor executor(
+        [&executed](const std::vector<std::string>&) -> boost::asio::awaitable<RedisReply> {
+            executed = true;
+            co_return RedisReply{RedisReply::Type::Integer, "", 0, {}};
+        });
+
+    ASSERT_TRUE(run_async(ioc, executor.execute_zset_remove_command_async("queue", {})));
+    EXPECT_FALSE(executed);
+}
+
 class RedisDatabaseAsyncValidatorTest : public ::testing::Test {
 protected:
     void SetUp() override
@@ -147,6 +177,30 @@ TEST_F(RedisDatabaseAsyncValidatorTest, ZsetBulkEnqueuePreservesExistingMembersW
     EXPECT_EQ(member, "first");
 }
 
+TEST_F(RedisDatabaseAsyncValidatorTest, ZsetBulkRemoveDeletesSelectedMembers)
+{
+    const std::string key = "fp:test:zset:" + generate_unique_id();
+    long long deleted = 0;
+    std::vector<std::string> delete_args{"DEL", key};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(delete_args, deleted)));
+
+    const std::unordered_map<std::string, unsigned int> members{
+        {"kept", 10},
+        {"removed-a", 20},
+        {"removed-b", 30}
+    };
+
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_enqueue_command_async(key, members)));
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_remove_command_async(key, {"removed-a", "removed-b"})));
+
+    std::string member;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_dequeue_command_async(key, member)));
+    EXPECT_EQ(member, "kept");
+
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_dequeue_command_async(key, member)));
+    EXPECT_TRUE(member.empty());
+}
+
 TEST_F(RedisDatabaseAsyncValidatorTest, EnqueueReadyJobStoresFullRedisJobKeyAndDequeueParsesIdentity)
 {
     run_async(ioc_, redis_->clear_execution_queue_async());
@@ -186,6 +240,65 @@ TEST_F(RedisDatabaseAsyncValidatorTest, EnqueueReadyJobStoresFullRedisJobKeyAndD
     ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {job_data})));
 }
 
+TEST_F(RedisDatabaseAsyncValidatorTest, RemoveWorkflowJobsFromExecutionQueueDeletesRedisJobKeys)
+{
+    run_async(ioc_, redis_->clear_execution_queue_async());
+
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    boost::uuids::time_generator_v7 gen;
+    const PrioritizedJobsList queued_jobs{
+        {"job-a", gen(), 10},
+        {"job-b", gen(), 20}
+    };
+    const PrioritizedJobsList removed_jobs{
+        {"job-a", gen(), 10}
+    };
+
+    JobRuntimeData job_b_runtime = make_job_runtime("job-b", JobStatus::READY, 0, 20);
+    ASSERT_TRUE(run_async(ioc_, redis_->set_job_runtime_async(workflow_id, job_b_runtime)));
+    ASSERT_TRUE(run_async(ioc_, redis_->queue_workflow_jobs_for_execution_async(workflow_id, queued_jobs)));
+    ASSERT_TRUE(run_async(ioc_, redis_->remove_jobs_from_execution_queue_async(workflow_id, removed_jobs)));
+
+    WorkflowIdentity dequeued_workflow_id;
+    std::string ready_job;
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_for_execution_async(dequeued_workflow_id, ready_job, "scheduler-a")));
+    EXPECT_EQ(dequeued_workflow_id.client_id, workflow_id.client_id);
+    EXPECT_EQ(dequeued_workflow_id.workflow_id, workflow_id.workflow_id);
+    EXPECT_EQ(ready_job, "job-b");
+
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_for_execution_async(dequeued_workflow_id, ready_job, "scheduler-a")));
+    EXPECT_TRUE(ready_job.empty());
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {job_b_runtime})));
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, DequeueRemovesStaleQueueEntryWithoutCreatingJobHash)
+{
+    run_async(ioc_, redis_->clear_execution_queue_async());
+
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string job_id = "job-" + generate_unique_id();
+
+    boost::uuids::time_generator_v7 gen;
+    PrioritizedJob ready_job{job_id, gen(), 9};
+    ASSERT_TRUE(run_async(ioc_, redis_->enqueue_job_for_execution_async(workflow_id, ready_job)));
+
+    WorkflowIdentity dequeued_identity;
+    std::string dequeued_job_id = "stale";
+    ASSERT_TRUE(run_async(ioc_,
+                          redis_->dequeue_job_for_execution_async(dequeued_identity, dequeued_job_id, "scheduler-stale")));
+    EXPECT_TRUE(dequeued_job_id.empty());
+
+    long long queue_size = -1;
+    ASSERT_TRUE(run_async(ioc_, redis_->get_execution_queue_size_async(queue_size)));
+    EXPECT_EQ(queue_size, 0);
+
+    long long exists = 0;
+    std::vector<std::string> exists_args{"EXISTS", RedisKeys::job_key(workflow_id, job_id)};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(exists_args, exists)));
+    EXPECT_EQ(exists, 0);
+}
+
 TEST_F(RedisDatabaseAsyncValidatorTest, DequeueDoesNotPopJobWhenOwnershipCannotBeAssigned)
 {
     run_async(ioc_, redis_->clear_execution_queue_async());
@@ -209,8 +322,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, DequeueDoesNotPopJobWhenOwnershipCannotB
                            redis_->dequeue_job_for_execution_async(dequeued_identity, dequeued_job_id, "scheduler-fail")));
 
     long long queue_size = 0;
-    std::vector<std::string> zcard_args{"ZCARD", "fp:execution_queue"};
-    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(zcard_args, queue_size)));
+    ASSERT_TRUE(run_async(ioc_, redis_->get_execution_queue_size_async(queue_size)));
     EXPECT_EQ(queue_size, 1);
 
     run_async(ioc_, redis_->clear_execution_queue_async());

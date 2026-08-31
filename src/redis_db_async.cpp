@@ -585,6 +585,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_acquire_job_slot_async(cons
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::create_workflow_runtime_data_async(const WorkflowRuntimeInfo& workflow_info) {
     if (!co_await set_workflow_runtime_async(workflow_info.identity, workflow_info.workflow)) {
+        co_await delete_workflow_runtime_async(workflow_info.identity);
         co_return false;
     }
 
@@ -688,11 +689,23 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::queue_workflow_jobs_for_executi
     std::unordered_map<std::string, unsigned int> members;
 
     for (const auto& job_info : queued_jobs) {
-         const auto job_key = RedisKeys::job_key(workflow_id, job_info.job_id);
+        const auto job_key = RedisKeys::job_key(workflow_id, job_info.job_id);
         members[job_key] = job_info.priority;
     }
-    co_return co_await command_executor_->execute_zset_enqueue_command_async("fp:execution_queue", members);
+    co_return co_await command_executor_->execute_zset_enqueue_command_async("fp:execution_queue", std::move(members));
 }
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::remove_jobs_from_execution_queue_async(const WorkflowIdentity& workflow_id,
+                                                                                        const PrioritizedJobsList& queued_jobs) {
+    std::vector<std::string> members;
+    members.reserve(queued_jobs.size());
+
+    for (const auto& job_info : queued_jobs) {
+        members.push_back(RedisKeys::job_key(workflow_id, job_info.job_id));
+    }
+    co_return co_await command_executor_->execute_zset_remove_command_async("fp:execution_queue", std::move(members));
+}
+
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
                                                                                     const PrioritizedJobsList& ready_jobs) {
@@ -730,20 +743,25 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::dequeue_job_for_execution_async
     const std::string lua_script = R"lua(
         local queue_key = KEYS[1]
         local scheduler_id = ARGV[1]
-        local top = redis.call('ZREVRANGE', queue_key, 0, 0)
-        if #top == 0 then
-            return {0, ''}
+        while true do
+            local top = redis.call('ZREVRANGE', queue_key, 0, 0)
+            if #top == 0 then
+                return {0, ''}
+            end
+
+            local job_key = top[1]
+            local job_type = redis.call('TYPE', job_key)['ok']
+            if job_type == 'none' then
+                redis.call('ZREM', queue_key, job_key)
+            elseif job_type ~= 'hash' then
+                return {-1, job_key}
+            else
+                redis.call('ZREM', queue_key, job_key)
+                redis.call('HSET', job_key, 'owned_by', scheduler_id)
+                return {1, job_key}
+            end
         end
 
-        local job_key = top[1]
-        local job_type = redis.call('TYPE', job_key)['ok']
-        if job_type ~= 'hash' and job_type ~= 'none' then
-            return {0, job_key}
-        end
-
-        redis.call('ZREM', queue_key, job_key)
-        redis.call('HSET', job_key, 'owned_by', scheduler_id)
-        return {1, job_key}
     )lua";
 
     std::vector<std::string> lua_values;
@@ -751,12 +769,17 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::dequeue_job_for_execution_async
         co_return false;
     }
 
-    if (lua_values.size() < 2 || lua_values[0] != "1") {
+    if (lua_values.size() < 2) {
         co_return false;
     }
 
     std::string ready_job_key = lua_values[1];
     if (ready_job_key.empty()) {
+        ready_job.clear();
+        co_return true;
+    }
+
+    if (lua_values[0] != "1") {
         co_return false;
     }
 
@@ -795,6 +818,33 @@ boost::asio::awaitable<void> RedisDatabaseAsync::clear_execution_queue_async() {
     std::vector<std::string> args{"DEL", "fp:execution_queue"};
     long long value = 0;
     co_await command_executor_->execute_integer_command_async(args, value);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::get_execution_queue_size_async(long long& size) const {
+    std::string queue_type;
+    std::vector<std::string> type_args{"TYPE", "fp:execution_queue"};
+    if (!co_await command_executor_->execute_bulk_string_command_async(type_args, queue_type)) {
+        size = 0;
+        co_return false;
+    }
+
+    if (queue_type == "none") {
+        size = 0;
+        co_return true;
+    }
+
+    if (queue_type != "zset") {
+        size = 0;
+        co_return false;
+    }
+
+    std::vector<std::string> args{"ZCARD", "fp:execution_queue"};
+    if (!co_await command_executor_->execute_integer_command_async(args, size)) {
+        size = 0;
+        co_return false;
+    }
+
+    co_return true;
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_runtime_async(const WorkflowIdentity& workflow_id, const JobRuntimeData& job_data) {

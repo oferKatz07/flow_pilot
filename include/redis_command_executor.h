@@ -50,7 +50,9 @@ public:
                                                                 long long& length) const;
     boost::asio::awaitable<bool> execute_zset_enqueue_command_async(const std::string& key,
                                                                     const std::unordered_map<std::string, unsigned int>& members) const;
-    boost::asio::awaitable<bool> execute_zset_dequeue_command_async(const std::string& key,
+    boost::asio::awaitable<bool> execute_zset_remove_command_async(std::string key,
+                                                                   std::vector<std::string> members) const;
+    boost::asio::awaitable<bool> execute_zset_dequeue_command_async(std::string key,
                                                                     std::string& member) const;
 
 private:

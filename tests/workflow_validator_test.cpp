@@ -116,6 +116,25 @@ static long long zcard(boost::asio::io_context& ioc, RedisDatabaseAsync& redis, 
     return count;
 }
 
+static bool redis_key_exists(boost::asio::io_context& ioc, RedisDatabaseAsync& redis, const std::string& key)
+{
+    long long exists = 0;
+    std::vector<std::string> args{"EXISTS", key};
+    EXPECT_TRUE(run_async(ioc, redis.command_executor().execute_integer_command_async(args, exists)));
+    return exists > 0;
+}
+
+static bool redis_set_contains(boost::asio::io_context& ioc,
+                               RedisDatabaseAsync& redis,
+                               const std::string& key,
+                               const std::string& member)
+{
+    long long contains = 0;
+    std::vector<std::string> args{"SISMEMBER", key, member};
+    EXPECT_TRUE(run_async(ioc, redis.command_executor().execute_integer_command_async(args, contains)));
+    return contains > 0;
+}
+
 static void cleanup_workflow_runtime(boost::asio::io_context& ioc,
                                      RedisDatabaseAsync& redis,
                                      const std::string& client_id,
@@ -515,8 +534,9 @@ TEST_F(WorkflowAdmissionServiceTest, MoreReadyJobsThanMaxConcurrentJobsSplitsExe
     }
     WorkflowIdentity empty_identity;
     std::string empty_job;
-    EXPECT_FALSE(run_async(shared_redis_ioc,
-                           redis->dequeue_job_for_execution_async(empty_identity, empty_job, "scheduler-more")));
+    EXPECT_TRUE(run_async(shared_redis_ioc,
+                          redis->dequeue_job_for_execution_async(empty_identity, empty_job, "scheduler-more")));
+    EXPECT_TRUE(empty_job.empty());
 
     cleanup_workflow_runtime(shared_redis_ioc, *redis, client_id, request_id, workflow_id,
                              {"ready-0", "ready-1", "ready-2", "ready-3", "ready-4"});
@@ -582,6 +602,174 @@ TEST_F(WorkflowAdmissionServiceTest, CyclicWorkflowHasNoInitiallyReadyJobsAndIsR
     EXPECT_TRUE(run_async(shared_redis_ioc,
                           RedisDatabaseAsync::get_instance()->fetch_workflow_runtime_async(identity, runtime)));
     EXPECT_TRUE(runtime.empty());
+}
+
+TEST_F(WorkflowAdmissionServiceTest, PersistRequestFailureReleasesRedisAdmissionState) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    const std::string client_id = "client-persist-request-fails-" + generate_unique_id();
+    const std::string request_id = "req-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+
+    RequestData existing_request;
+    existing_request.client_id = client_id;
+    existing_request.request_id = request_id;
+    existing_request.workflow_id = "already-persisted-" + generate_unique_id();
+    existing_request.workflow_payload_size_bytes = 10;
+    existing_request.operation = "CREATE";
+    existing_request.status = RequestStatus::RECEIVED;
+
+    StatusCodes sqlite_error;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().add_request(existing_request, sqlite_error));
+
+    json workflow = make_runtime_workflow(client_id, workflow_id, 1);
+    workflow["request_id"] = request_id;
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.status_code, StatusCodes::DUPLICATE_REQUEST);
+
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, "fp:req:" + client_id + ":" + request_id));
+    EXPECT_FALSE(redis_set_contains(shared_redis_ioc, *redis, "fp:active:" + client_id + ":workflows", workflow_id));
+
+    std::vector<WorkflowData> workflows;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_workflows_for_client(client_id, workflows));
+    EXPECT_TRUE(workflows.empty());
+}
+
+TEST_F(WorkflowAdmissionServiceTest, ValidationFailureAfterRequestPersistenceRejectsRequestAndLeavesNoRuntime) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    const std::string client_id = "client-validation-fails-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+
+    json workflow;
+    workflow["request_id"] = "req-" + generate_unique_id();
+    workflow["client_id"] = client_id;
+    workflow["workflow_id"] = workflow_id;
+    workflow["workflow_type"] = "order_processing";
+
+    json job;
+    job["job_id"] = "job-with-missing-dependency";
+    job["type"] = "reserve_inventory";
+    job["depends_on"] = json::array({"missing-job"});
+    job["payload"] = std::vector<uint8_t>{1};
+    workflow["jobs"] = json::array({job});
+
+    const std::string request_id = workflow["request_id"].get<std::string>();
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.status_code, StatusCodes::MISSING_DEPENDENCY);
+
+    std::vector<RequestData> requests;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_requests_for_client(client_id, requests));
+    ASSERT_EQ(requests.size(), 1u);
+    EXPECT_EQ(requests[0].status, RequestStatus::REJECTED);
+
+    std::vector<WorkflowData> workflows;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_workflows_for_client(client_id, workflows));
+    EXPECT_TRUE(workflows.empty());
+
+    WorkflowIdentity identity{client_id, workflow_id};
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_key(identity)));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "job-with-missing-dependency")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "job-with-missing-dependency")));
+    EXPECT_FALSE(redis_set_contains(shared_redis_ioc, *redis, "fp:active:" + client_id + ":workflows", workflow_id));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, "fp:req:" + client_id + ":" + request_id));
+}
+
+TEST_F(WorkflowAdmissionServiceTest, RuntimeCreationFailureFailsWorkflowCancelsUnexecutedJobsAndRemovesRedisRunData) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    const std::string client_id = "client-runtime-create-fails-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+    WorkflowIdentity identity{client_id, workflow_id};
+
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis->command_executor().execute_set_command_async(
+                              RedisKeys::workflow_key(identity),
+                              "not-a-workflow-hash",
+                              0,
+                              false)));
+
+    json workflow = make_runtime_workflow(client_id, workflow_id, 2, 1);
+    const std::string request_id = workflow["request_id"].get<std::string>();
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.status_code, StatusCodes::INTERNAL_DB_FAILURE);
+
+    std::vector<WorkflowData> workflows;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_workflows_for_client(client_id, workflows));
+    ASSERT_EQ(workflows.size(), 1u);
+    EXPECT_EQ(workflows[0].status, WorkflowStatus::FAILED);
+
+    std::vector<WorkflowJob> jobs;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_jobs_for_workflow(client_id, workflow_id, jobs));
+    ASSERT_EQ(jobs.size(), 3u);
+    auto counts = count_job_statuses(jobs);
+    EXPECT_EQ(counts[JobStatus::CANCELED], 3);
+
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_key(identity)));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "ready-0")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "ready-1")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "pending-0")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "ready-0")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "ready-1")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "pending-0")));
+    EXPECT_FALSE(redis_set_contains(shared_redis_ioc, *redis, "fp:active:" + client_id + ":workflows", workflow_id));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, "fp:req:" + client_id + ":" + request_id));
+}
+
+TEST_F(WorkflowAdmissionServiceTest, QueuePublishFailureFailsWorkflowCancelsUnexecutedJobsAndRemovesRedisRunData) {
+    auto redis = RedisDatabaseAsync::get_instance();
+    run_async(shared_redis_ioc, redis->clear_execution_queue_async());
+    ASSERT_TRUE(run_async(shared_redis_ioc,
+                          redis->command_executor().execute_set_command_async(
+                              "fp:execution_queue",
+                              "not-a-zset",
+                              0,
+                              false)));
+
+    const std::string client_id = "client-queue-publish-fails-" + generate_unique_id();
+    const std::string workflow_id = "wf-" + generate_unique_id();
+    WorkflowIdentity identity{client_id, workflow_id};
+    json workflow = make_runtime_workflow(client_id, workflow_id, 3, 1);
+    const std::string request_id = workflow["request_id"].get<std::string>();
+
+    const ValidationResult result = submit_workflow_sync(ioc_, *service, workflow.dump());
+    EXPECT_FALSE(result.valid);
+    EXPECT_EQ(result.status_code, StatusCodes::INTERNAL_DB_FAILURE);
+
+    std::vector<WorkflowData> workflows;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_workflows_for_client(client_id, workflows));
+    ASSERT_EQ(workflows.size(), 1u);
+    EXPECT_EQ(workflows[0].status, WorkflowStatus::FAILED);
+
+    std::vector<WorkflowJob> jobs;
+    ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_jobs_for_workflow(client_id, workflow_id, jobs));
+    ASSERT_EQ(jobs.size(), 4u);
+    auto counts = count_job_statuses(jobs);
+    EXPECT_EQ(counts[JobStatus::CANCELED], 4);
+
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_key(identity)));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "ready-0")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "ready-1")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "ready-2")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::job_key(identity, "pending-0")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "ready-0")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "ready-1")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "ready-2")));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::payload_key(identity, "pending-0")));
+    EXPECT_FALSE(redis_set_contains(shared_redis_ioc, *redis, "fp:active:" + client_id + ":workflows", workflow_id));
+    EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, "fp:req:" + client_id + ":" + request_id));
+
+    long long execution_queue_size = -1;
+    EXPECT_FALSE(run_async(shared_redis_ioc, redis->get_execution_queue_size_async(execution_queue_size)));
+    EXPECT_EQ(execution_queue_size, 0);
+
+    long long deleted = 0;
+    std::vector<std::string> del_args{"DEL", "fp:execution_queue"};
+    ASSERT_TRUE(run_async(shared_redis_ioc, redis->command_executor().execute_integer_command_async(del_args, deleted)));
 }
 
 TEST(RedisDatabaseTest, InvalidConnectionStringFails) {

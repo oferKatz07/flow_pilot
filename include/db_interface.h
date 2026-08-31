@@ -120,7 +120,7 @@ private:
     /// Create required tables and indexes if they do not exist.
     virtual bool create_schema() = 0;
     virtual bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) = 0;
-    virtual bool fail_all_pending_jobs(const std::string& client_id, const std::string& workflow_id) = 0;
+    virtual bool fail_all_jobs_waiting_to_run(const std::string& client_id, const std::string& workflow_id) = 0;
 };
 
 } // namespace flow_pilot

@@ -634,7 +634,7 @@ bool SQLiteDatabase::get_all_workflows_for_client(const std::string& client_id, 
 bool SQLiteDatabase::fail_workflow(const std::string& client_id, const std::string& workflow_id) {
     bool ret_val1;
     bool ret_val2;
-    ret_val1 = fail_all_pending_jobs(client_id, workflow_id);
+    ret_val1 = fail_all_jobs_waiting_to_run(client_id, workflow_id);
     ret_val2 = update_workflow_status(client_id, workflow_id, WorkflowStatus::FAILED);
 
     return ret_val1 || ret_val2;
@@ -1029,8 +1029,8 @@ bool SQLiteDatabase::get_client_active_workflows_count(const std::string& client
     return ret_val;
 }
 
-bool SQLiteDatabase::fail_all_pending_jobs(const std::string& client_id, const std::string& workflow_id) {
-    const char* sql = "UPDATE jobs SET status = ? WHERE client_id = ? AND workflow_id = ? AND status IN (?, ?);";
+bool SQLiteDatabase::fail_all_jobs_waiting_to_run(const std::string& client_id, const std::string& workflow_id) {
+    const char* sql = "UPDATE jobs SET status = ? WHERE client_id = ? AND workflow_id = ? AND status IN (?, ?, ?);";
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr);
     if (rc != SQLITE_OK) {
@@ -1042,11 +1042,12 @@ bool SQLiteDatabase::fail_all_pending_jobs(const std::string& client_id, const s
         return false;
     }
 
-    sqlite3_bind_int(stmt,  1, to_int(JobStatus::FAILED));
+    sqlite3_bind_int(stmt,  1, to_int(JobStatus::CANCELED));
     sqlite3_bind_text(stmt, 2, client_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, workflow_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt,  4, to_int(JobStatus::PENDING));
     sqlite3_bind_int(stmt,  5, to_int(JobStatus::READY));
+    sqlite3_bind_int(stmt,  6, to_int(JobStatus::QUEUED));
 
     bool ret_val = true;
     rc = sqlite3_step(stmt);

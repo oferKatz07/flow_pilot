@@ -315,7 +315,32 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_enqueue_command_
     co_return false;
 }
 
-boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_dequeue_command_async(const std::string& key,
+boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_remove_command_async(
+    std::string key,
+    std::vector<std::string> members) const
+{
+    try {
+        if (members.empty()) {
+            co_return true;
+        }
+
+        std::vector<std::string> args;
+        args.reserve(2 + members.size());
+        args.push_back("ZREM");
+        args.push_back(key);
+        args.insert(args.end(), members.begin(), members.end());
+
+        auto reply = co_await execute_(args);
+        if (reply.type == RedisReply::Type::Integer) {
+            co_return true;
+        }
+    } catch (const std::exception& ex) {
+        Logger::get_logger()->error("execute_zset_remove_command_async - Redis ZREM command failed: {}", ex.what());
+    }
+    co_return false;
+}
+
+boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_dequeue_command_async(std::string key,
                                                                                       std::string& member) const
 {
     try {

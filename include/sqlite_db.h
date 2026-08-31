@@ -115,7 +115,7 @@ private:
     
     bool add_request_payload(const RequestData& request_data, const std::string& workflow_payload);
     bool get_client_active_workflows_count(const std::string& client_id, int& active_workflows) override;
-    bool fail_all_pending_jobs(const std::string& client_id, const std::string& workflow_id) override;
+    bool fail_all_jobs_waiting_to_run(const std::string& client_id, const std::string& workflow_id) override;
 
     void create_rate_limit_plans_table();
     void create_policy_plans_table();

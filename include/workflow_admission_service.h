@@ -12,21 +12,15 @@
 #include <nlohmann/json-schema.hpp>
 #include <boost/asio.hpp>
 
+#include "admission_types.h"
 #include "db_interface.h"
 #include "redis_db_async.h"
-#include "flow_pilot_error_msgs.h"
 
 namespace flow_pilot {
 
 using json = nlohmann::json;
 
 class PolicyPlan;
-
-struct ValidationResult {
-    bool valid;
-    StatusCodes status_code;
-    std::string errors_msg;
-};
 
 struct DagData {
     std::string job_id;
@@ -42,16 +36,6 @@ public:
      boost::asio::awaitable<ValidationResult> submit_workflow(const std::string& body);
 
 private:
-    enum class ValidationStage {
-        PARSE_REQUEST,
-        GET_CLIENT_CONFIG,
-        ADMIT_REQUEST,
-        PERSIST_REQUEST,
-        VALIDATE_WORKFLOW,
-        PERSIST_WORKFLOW,
-        GENERATE_RUNTIME_DATA
-    };
-
     bool parse_request(const std::string& body, json& workflow_data, 
                        RequestData& request_info, ValidationResult& result);
     bool get_client_config_data(const std::string& client_id, ClientConfig& client_config, ValidationResult& result);
@@ -61,11 +45,11 @@ private:
     boost::asio::awaitable<bool> persist_request(const RequestData& request_info, const std::string& body, 
                                                  const ClientConfig& client_config, StatusCodes& rejection_reason);
     bool validate_workflow(const json& workflow_data, const PolicyPlan& policy_config, 
-                           std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
+                           JobRuntimeMap& jobs_runtime_info, 
                            WorkflowData& workflow_info, 
                            StatusCodes& rejection_reason);
      boost::asio::awaitable<bool>  persist_workflow(const WorkflowData& workflow_info, 
-                                                    const std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
+                                                    const JobRuntimeMap& jobs_runtime_info,
                                                     const int policy_jobs_retry_num, 
                                                     StatusCodes& rejection_reason);
     bool validate_admission_client_workflow_policy(const json& workflow_data, 
@@ -75,23 +59,11 @@ private:
                            std::unordered_map<std::string, DagData>& jobs_map, 
                            StatusCodes& rejection_reason);
     bool validate_dependencies(const json& data, 
-                               std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info, 
+                               JobRuntimeMap& jobs_runtime_info, 
                                std::unordered_map<std::string, DagData>& jobs_map, 
                                StatusCodes& rejection_reason);
-    boost::asio::awaitable<ValidationResult> handle_request_rejection(ValidationResult& result, 
-                                                                      RequestData& request_info,
-                                                                      ValidationStage validation_stage, 
-                                                                      const StatusCodes& rejection_reason);
     boost::asio::awaitable<ValidationResult> handle_request_accepted(ValidationResult& result, 
                                                                      RequestData& request_info);
-    boost::asio::awaitable<void> update_redis_request_status(const RequestData& request_info);
-    boost::asio::awaitable<bool> generate_workflow_runtime_data(const json& workflow_data, const PolicyPlan& policy_config, const WorkflowData& workflow_info, 
-                                                                const JobPriorityQueue& ready_jobs,
-                                                                std::unordered_map<std::string,JobRuntimeData>& jobs_runtime_info);
-    bool get_jobs_runtime_info(const json& workflow_data, 
-                               const PolicyPlan& policy_config,
-                               std::unordered_map<std::string, JobRuntimeData>& jobs_runtime_info,
-                               JobPriorityQueue& ready_jobs);                       
 
     static constexpr int DEFAULT_MAX_ACTIVE_WORKFLOWS = 10;
     static constexpr int DEFAULT_RATE_REQUESTS = 3;
