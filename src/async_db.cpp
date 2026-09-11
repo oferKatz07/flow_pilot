@@ -125,6 +125,16 @@ boost::asio::awaitable<bool> AsyncDatabase::update_ready_jobs_async(
     co_return db_.update_ready_jobs(client_id, workflow_id, queued_job_ids, ready_job_ids);
 }
 
+boost::asio::awaitable<bool> AsyncDatabase::update_job_status_async(
+        const std::string& client_id,
+        const std::string& workflow_id,
+        const std::string& job_id,
+        const JobStatus status) {
+    auto executor = pool_.get_executor();
+    co_await boost::asio::post(executor, boost::asio::use_awaitable);
+    co_return db_.update_job_status(client_id, workflow_id, job_id, status);
+}
+
 IDatabase& AsyncDatabase::get_db_instance()
 {
     if (Config::get().db_config().db_type == DBConfig::DBTypes::ASYNC_SQLITE) {

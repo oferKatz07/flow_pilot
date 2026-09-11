@@ -54,6 +54,9 @@ public:
                                                                    std::vector<std::string> members) const;
     boost::asio::awaitable<bool> execute_zset_dequeue_command_async(std::string key,
                                                                     std::string& member) const;
+    boost::asio::awaitable<bool> execute_zset_blocking_dequeue_command_async(std::string key,
+                                                                             std::string& member,
+                                                                             int timeout_seconds = 0) const;
 
 private:
     ExecuteFunction execute_;

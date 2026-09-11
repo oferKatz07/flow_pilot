@@ -1,12 +1,15 @@
 # FlowPilot
 
-A distributed reliable workflow orchestration platform designed for reliable asynchronous task execution, dependency-aware scheduling, and extensible worker integration.
+A distributed workflow orchestration platform designed for reliable asynchronous task execution, dependency-aware scheduling, and extensible worker integration.
 
 FlowPilot is a modern backend infrastructure project that explores production-grade workflow orchestration using asynchronous C++, coroutines, Redis, and SQLite.
 
 The project focuses on the engineering challenges behind reliable distributed systems rather than workflow business logic. Its architecture emphasizes idempotent request admission, dependency-aware scheduling, durable request auditing and workflow persistence, and scalable asynchronous execution.
 
+The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY → QUEUED → RUNNING job transitions, scheduler ownership, worker dispatch, completion handling, and recovery.
+
 FlowPilot is being developed as a portfolio-quality system architecture project demonstrating modern C++ backend design, concurrent programming, and infrastructure engineering.
+
 ---
 
 # Engineering Objectives
@@ -121,9 +124,9 @@ This enables:
 
 # Key Design Decisions
 
-FlowPilot is being developed in phases. 
-The current implementation focuses on building a robust admission layer that guarantees only valid workflows are registered for execution. 
-Subsequent phases build the execution engine and distributed orchestration capabilities on top of this foundation.
+FlowPilot is being developed in phases.
+The current implementation has a robust admission layer that guarantees only valid workflows are registered for execution, and the execution engine is now being built on top of that foundation.
+The active execution work focuses on scheduler dispatch, worker lifecycle transitions, completion handling, retry behavior, and recovery.
 
 ## Atomic Workflow Admission
 
@@ -153,6 +156,20 @@ Workflow DAGs are immutable after admission to simplify execution semantics and 
 Workflow execution is fully asynchronous.
 
 The API gateway never blocks waiting for workflow completion.
+
+## Explicit Job Execution Lifecycle
+
+FlowPilot separates dependency readiness, workflow execution-slot reservation, scheduler dispatch, and actual execution.
+
+The current runtime job lifecycle is:
+
+```text
+PENDING -> READY -> QUEUED -> RUNNING -> COMPLETED | FAILED | CANCELED
+```
+
+`READY` means dependencies are satisfied. `QUEUED` means the workflow has reserved an execution slot and the job is eligible for scheduler dispatch. `RUNNING` begins only when a worker fetches the job and the execution timer starts.
+
+Redis is the runtime authority for these transitions during execution, while SQLite persists durable status and timestamp history.
 
 ## Explicit Compensation
 
@@ -190,6 +207,7 @@ These policies are loaded during initialization and applied during workflow admi
 * Grafana dashboards
 * Go-based workers
 * Distributed scheduler coordination
+* Health monitoring and recovery for schedulers and worker threads
 
 ---
 
@@ -216,7 +234,9 @@ These policies are loaded during initialization and applied during workflow admi
 
 ## Implementation Status
 
-The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, and DAG dependency validation. Current development is focused on the workflow execution engine, including job scheduling, worker dispatch, and execution lifecycle management.
+The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, DAG dependency validation, SQLite persistence, Redis runtime initialization, and initial execution-queue population.
+
+The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED → RUNNING transitions, and durable SQLite timestamps for READY/QUEUED/RUNNING lifecycle events. The next major implementation step is completion handling, followed by dependency advancement, retry handling, and workflow finalization.
 
 
 ### Current Project Status
@@ -239,9 +259,27 @@ The workflow admission subsystem is feature-complete and includes idempotent req
 
 ✔ Audit history
 
+✔ Redis runtime initialization
+
+✔ Initial READY/QUEUED job preparation
+
+✔ Priority execution queue
+
+✔ Scheduler ownership for claimed jobs
+
+✔ Local worker dispatch foundation
+
+✔ READY/QUEUED/RUNNING lifecycle tests
+
 🚧 Scheduler
 
 🚧 Worker execution
+
+🚧 Completion handler
+
+🚧 Dependency advancement after completion
+
+🚧 Scheduler-local health monitor and recovery
 
 🚧 Distributed workers
 
@@ -257,19 +295,28 @@ The workflow admission subsystem is feature-complete and includes idempotent req
 - SQLite persistence
 - Workflow validation
 - DAG validation
+- Redis runtime initialization
+- Initial execution queue population
 - Unit testing
 
 ### Phase 2 — Workflow Execution (In Progress)
 
-- Job initialization
-- Scheduler
-- Worker dispatch
-- Execution monitoring
+- Explicit PENDING/READY/QUEUED/RUNNING job lifecycle
+- Workflow execution-slot reservation
+- Priority-based Redis execution queue
+- Scheduler ownership for claimed jobs
+- Bounded local scheduler queue
+- Worker dispatch and QUEUED → RUNNING transition
+- Completion handler
+- Dependency advancement
+- Retry handling
+- Scheduler-local health monitoring and recovery
 
 ### Phase 3 — Distributed Orchestration (Planned)
 
 - Multi-node scheduler
-- Recovery
+- Dead-scheduler ownership recovery
+- Redis runtime reconstruction
 - Horizontal scaling
 - Observability
 

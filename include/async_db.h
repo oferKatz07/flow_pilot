@@ -73,6 +73,12 @@ public:
         const std::vector<std::string>& queued_job_ids,
         const std::vector<std::string>& ready_job_ids) override;
 
+    boost::asio::awaitable<bool> update_job_status_async(
+        const std::string& client_id,
+        const std::string& workflow_id,
+        const std::string& job_id,
+        const JobStatus status) override;
+
 private:
     explicit AsyncDatabase();
     static IDatabase& get_db_instance();

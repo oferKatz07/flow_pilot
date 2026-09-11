@@ -58,6 +58,7 @@ set(FLOW_PILOT_SOURCES
     src/workflow_runtime_generator.cpp
     src/workflow_admission_service.cpp
     src/scheduler.cpp
+    src/worker_thread.cpp
 )
 
 # Build a library from all project sources (exclude main.cpp)
@@ -90,6 +91,7 @@ add_executable(flow_pilot_tests
     tests/workflow_validator_test.cpp
     tests/async_sqlite_db_test.cpp
     tests/redis_db_async_validator_test.cpp
+    tests/scheduler_worker_test.cpp
 )
 
 target_include_directories(flow_pilot_tests PRIVATE include)

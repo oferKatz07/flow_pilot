@@ -312,6 +312,8 @@ The scheduler is responsible for:
 * Dispatching QUEUED jobs to available workers/executors.
 * Transitioning a job to RUNNING only when a worker actually fetches it.
 * Starting the execution-time budget when the worker fetches the job, rather than when the scheduler reserves it.
+* Monitoring dispatcher and worker-thread health.
+* Activating scheduler-local recovery when a worker thread becomes non-responsive.
 * Processing completion/failure events.
 * Advancing dependency state after successful completion.
 * Making newly eligible successor jobs READY.
@@ -329,8 +331,39 @@ The scheduler uses:
 * A bounded collection of jobs already reserved by the scheduler and waiting for worker capacity.
 * A priority-ordered local container for efficient selection of the next job to execute.
 * Scheduler identity stored in the job's `owned_by` field after a scheduler claims a QUEUED job. Workflow execution-slot reservation and scheduler ownership are separate concepts.
+* Per-worker in-flight job ownership, heartbeat, and last-progress metadata for health monitoring.
+* A scheduler-local recovery queue used to reprocess jobs whose worker thread failed before reporting completion.
 
 Scheduler-local priority adjustments, such as future fairness/aging, do not modify the job's persisted priority in Redis or SQLite.
+
+## Planned Health Monitor and Recovery
+
+The scheduler will include a health monitor responsible for detecting non-responsive execution threads and triggering recovery for their in-flight work.
+
+The health monitor tracks:
+
+* Dispatcher progress, including whether the scheduler main loop is still polling Redis and dispatching work.
+* Worker-thread heartbeats or progress timestamps.
+* The job currently assigned to each worker thread.
+* Scheduler-owned jobs that have not reached a terminal state.
+
+If a worker thread becomes non-responsive, the health monitor should stop using that thread, terminate it when the platform supports safe termination, and hand its in-flight job to the scheduler recovery component. The recovery component is responsible for reconciling the job's Redis runtime state and returning it to an executable state when appropriate.
+
+Worker-thread failure is handled locally by the scheduler that owns the worker. Scheduler-process failure is handled by distributed recovery. Both recovery paths use the same ownership model: jobs with `owned_by = <scheduler_id>` and non-terminal status are candidates for reclaim; jobs already in terminal states are not reclaimed.
+
+Recovery must preserve the execution-slot invariant:
+
+```text
+reserved_execution_slots = QUEUED jobs + RUNNING jobs
+```
+
+For a reclaimed job:
+
+* If the job can be retried, recovery clears stale worker ownership metadata, updates retry bookkeeping, and returns the job to READY or QUEUED according to retry delay and workflow capacity.
+* If the job cannot be retried, recovery finalizes it as FAILED or CANCELED through the same completion/finalization path used by normal execution.
+* If the scheduler itself died, another scheduler or recovery coordinator reclaims the abandoned non-terminal jobs owned by the dead scheduler.
+
+The completion handler remains the canonical place for releasing execution slots, updating workflow counters, advancing dependencies, and persisting final SQLite status. Recovery should therefore route recovered terminal outcomes through completion handling rather than duplicating completion logic.
 
 
 # Scheduler Runtime Data Access
@@ -732,6 +765,7 @@ Current scheduler implementation focus:
 7. Advance dependencies and promote eligible successors through READY → QUEUED.
 8. Integrate delayed retry handling.
 9. Complete/fail workflows from aggregate job state.
+10. Add scheduler-local worker health monitoring and recovery.
 
 ## Phase 3 — Distributed Orchestration
 
@@ -739,6 +773,8 @@ Planned:
 
 * Multiple scheduler instances.
 * Distributed scheduler coordination and dead-scheduler ownership recovery.
+* Scheduler health monitor for dispatcher and worker-thread responsiveness.
+* Scheduler-local recovery for non-responsive worker threads and their in-flight jobs.
 * Redis runtime reconstruction after failure.
 * Horizontal worker scaling.
 * Remote worker execution.

@@ -272,3 +272,16 @@ TEST(SQLiteDatabaseTest, ReadyQueuedRunningTransitionsSetExpectedTimestamps) {
     EXPECT_EQ(workflows[0].status, WorkflowStatus::READY);
     EXPECT_GT(workflows[0].ready_at, 0);
 }
+
+TEST(SQLiteDatabaseTest, StatusUpdatesFailWhenRowsAreMissing) {
+    Config::get().logger().output = LogOutput::CONSOLE_ONLY;
+
+    auto& db = SQLiteDatabase::get_instance();
+    const std::string client_id = "missing-status-client";
+    const std::string workflow_id = "missing-status-wf";
+
+    EXPECT_FALSE(db.update_workflow_status(client_id, workflow_id, WorkflowStatus::RUNNING));
+    EXPECT_FALSE(db.update_job_status(client_id, workflow_id, "missing-job", JobStatus::RUNNING));
+    EXPECT_FALSE(db.update_ready_jobs(client_id, workflow_id, {"missing-queued-job"}, {}));
+    EXPECT_FALSE(db.update_ready_jobs(client_id, workflow_id, {}, {"missing-ready-job"}));
+}

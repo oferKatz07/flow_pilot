@@ -3,60 +3,50 @@
 
 #pragma once
 
+#include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <string>
-#include <list>
 #include <vector>
-#include <set>
-#include <unordered_map>
+#include <thread>
 
 #include "db_factory.h"
 #include "redis_db_async.h"
+#include "thread_safe_blocking_queue.h"
+#include "worker_thread.h"
 
 namespace flow_pilot {
 
-constexpr uint WORKER_NUM = 4;
-constexpr uint TOTAL_PENDIG_JOBS = 2 * WORKER_NUM;
-// constexpr uint EXE_QUEUE_SIZE = WORKER_NUM + 2;
+constexpr std::size_t DEFAULT_WORKERS_NUM = 10;
 
-struct JobExeData {
-    WorkflowIdentity identity;
-    std::string job_id;
-    uint priority;
-    uint seq_num;
-    std::vector<uint8_t> payload;
-};
-
-struct ExeQueueomparator {
-    bool operator()(const std::list<JobExeData>::iterator lhs,
-                    const std::list<JobExeData>::iterator rhs) const {
-        if ((*lhs).priority != (*rhs).priority)
-            return (*lhs).priority > (*rhs).priority;
-
-        return (*lhs).seq_num < (*rhs).seq_num;
-    }
-};
-
-struct WorkflowJobsState {
-    std::set<std::list<JobExeData>::iterator, ExeQueueomparator> jobs_for_execution;
-};
-
-class scheduler {
+class scheduler : public IJobFetcher {
 public:
-    boost::asio::awaitable<void> ready_job_event();
-    // JobExeData& get_next_job_for_execution();
+    explicit scheduler(std::size_t worker_thread_count = DEFAULT_WORKERS_NUM,
+                       std::size_t worker_queue_capacity = DEFAULT_WORKERS_NUM);
+    ~scheduler();
+
+    scheduler(const scheduler&) = delete; // Don't allow for a copy constructor
+    scheduler& operator=(const scheduler&) = delete; // Don't allow assignment operator
+    boost::asio::awaitable<void> scheduler_main_loop();
+    bool fetch_job(JobExeData& job_exe_data) override;
 
 private:
-    void update_pending_jobs(JobExeData& job_info);
-    boost::asio::awaitable<void> update_job_status(const WorkflowIdentity& itentity, const std::string job_id, const JobStatus job_status);
-    void creat_workflow_map_key(const WorkflowIdentity& itentity, std::string& workflow_id);
+    void stop() {
+        running_.store(false, std::memory_order_release);
+    }
 
-    size_t seq_num = 0;
-    size_t total_waiting_jobs = 0;
-    std::string scheduler_uuid = "12345";
+    void mark_main_loop_finished();
+    void wait_for_main_loop_finished();
+    boost::asio::awaitable<bool> get_next_ready_job(JobExeData& ready_job_info);
 
-    std::list<JobExeData> scheduler_pending_jobs;
-    std::unordered_map<std::string, WorkflowJobsState> ready_jobs;
-    std::set<JobExeData, ExeQueueomparator> execution_queue;
+    const std::string scheduler_uuid_;
+    ThreadSafeBlockingQueue<JobExeData> worker_thread_queue_;
+    std::vector<std::thread> worker_threads_;
+    std::atomic<bool> running_;
+    std::atomic<bool> main_loop_started_{false};
+    bool main_loop_finished_{false};
+    std::mutex main_loop_finished_mutex_;
+    std::condition_variable main_loop_finished_cv_;
 };
 
 } // namespace flow_pilot

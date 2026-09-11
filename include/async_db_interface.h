@@ -63,7 +63,12 @@ public:
         const std::string& workflow_id,
         const std::vector<std::string>& queud_job_ids,
         const std::vector<std::string>& ready_job_ids) = 0;
+
+    virtual boost::asio::awaitable<bool> update_job_status_async(
+        const std::string& client_id,
+        const std::string& workflow_id,
+        const std::string& job_id,
+        const JobStatus status) = 0;
 };
 
 } // namespace flow_pilot
-

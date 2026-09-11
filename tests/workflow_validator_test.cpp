@@ -460,8 +460,10 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
 
     std::string ready_job_key;
     ASSERT_TRUE(run_async(shared_redis_ioc,
-                          redis->dequeue_job_for_execution_async(identity, ready_job_key, "test-scheduler")));
-    EXPECT_EQ(ready_job_key, "job-1");
+                          redis->command_executor().execute_zset_dequeue_command_async(
+                              "fp:execution_queue",
+                              ready_job_key)));
+    EXPECT_EQ(ready_job_key, RedisKeys::job_key(identity, "job-1"));
 
     std::shared_ptr<RedisDatabaseAsync> redis_cleanup = RedisDatabaseAsync::get_instance();
     EXPECT_TRUE(run_async(shared_redis_ioc,
@@ -524,18 +526,18 @@ TEST_F(WorkflowAdmissionServiceTest, MoreReadyJobsThanMaxConcurrentJobsSplitsExe
 
     std::vector<std::string> dequeued;
     for (int i = 0; i < 2; ++i) {
-        WorkflowIdentity dequeued_identity;
         std::string job_id;
         ASSERT_TRUE(run_async(shared_redis_ioc,
-                              redis->dequeue_job_for_execution_async(dequeued_identity, job_id, "scheduler-more")));
-        EXPECT_EQ(dequeued_identity.client_id, client_id);
-        EXPECT_EQ(dequeued_identity.workflow_id, workflow_id);
+                              redis->command_executor().execute_zset_dequeue_command_async(
+                                  "fp:execution_queue",
+                                  job_id)));
         dequeued.push_back(job_id);
     }
-    WorkflowIdentity empty_identity;
     std::string empty_job;
     EXPECT_TRUE(run_async(shared_redis_ioc,
-                          redis->dequeue_job_for_execution_async(empty_identity, empty_job, "scheduler-more")));
+                          redis->command_executor().execute_zset_dequeue_command_async(
+                              "fp:execution_queue",
+                              empty_job)));
     EXPECT_TRUE(empty_job.empty());
 
     cleanup_workflow_runtime(shared_redis_ioc, *redis, client_id, request_id, workflow_id,

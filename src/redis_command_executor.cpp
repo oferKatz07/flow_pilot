@@ -363,4 +363,35 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_dequeue_command_
     co_return false;
 }
 
+boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_blocking_dequeue_command_async(
+    std::string key,
+    std::string& member,
+    int timeout_seconds) const
+{
+    try {
+        std::vector<std::string> args{"BZPOPMAX", key, std::to_string(timeout_seconds)};
+        auto reply = co_await execute_(args);
+        if (reply.type == RedisReply::Type::Array) {
+            if (reply.array_value.empty()) {
+                member.clear();
+                co_return true;
+            }
+
+            if (reply.array_value.size() >= 2) {
+                member = reply.array_value[1];
+                co_return true;
+            }
+        }
+        if (reply.type == RedisReply::Type::Nil) {
+            member.clear();
+            co_return true;
+        }
+    } catch (const std::exception& ex) {
+        Logger::get_logger()->error("execute_zset_blocking_dequeue_command_async - Redis BZPOPMAX command failed: {}",
+                                    ex.what());
+    }
+    member.clear();
+    co_return false;
+}
+
 } // namespace flow_pilot

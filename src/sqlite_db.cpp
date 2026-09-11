@@ -554,6 +554,16 @@ bool SQLiteDatabase::update_workflow_status(const std::string& client_id, const 
         sqlite3_finalize(stmt);
         return false;
     }
+
+    if (sqlite3_changes(db_) == 0) {
+        Logger::get_logger()->error(
+            "update_workflow_status - no workflow row found for client_id={} workflow_id={}",
+            client_id,
+            workflow_id);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
     sqlite3_finalize(stmt);
     return true;
 }
@@ -637,7 +647,7 @@ bool SQLiteDatabase::fail_workflow(const std::string& client_id, const std::stri
     ret_val1 = fail_all_jobs_waiting_to_run(client_id, workflow_id);
     ret_val2 = update_workflow_status(client_id, workflow_id, WorkflowStatus::FAILED);
 
-    return ret_val1 || ret_val2;
+    return ret_val1 && ret_val2;
 }
 
 bool SQLiteDatabase::get_all_jobs_for_workflow(const std::string& client_id, const std::string& workflow_id, 
@@ -804,6 +814,22 @@ bool SQLiteDatabase::update_ready_jobs(const std::string& client_id, const std::
             return false;
         }
 
+        if (sqlite3_changes(db_) == 0) {
+            Logger::get_logger()->error(
+                "update_ready_jobs - no job row found for READY update client_id={} workflow_id={} job_id={}",
+                client_id,
+                workflow_id,
+                job_id);
+            if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &errMsg)) {
+                Logger::get_logger()->error("Failed to rollback SQLite update_ready_jobs transaction: {}",
+                                            errMsg ? errMsg : sqlite3_errmsg(db_));
+                sqlite3_free(errMsg);
+            }
+
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
         // Reset stmt for the next iteration
         sqlite3_reset(stmt); 
     }
@@ -824,6 +850,22 @@ bool SQLiteDatabase::update_ready_jobs(const std::string& client_id, const std::
                 sqlite3_free(errMsg);
             }
             
+            sqlite3_finalize(stmt);
+            return false;
+        }
+
+        if (sqlite3_changes(db_) == 0) {
+            Logger::get_logger()->error(
+                "update_ready_jobs - no job row found for QUEUED update client_id={} workflow_id={} job_id={}",
+                client_id,
+                workflow_id,
+                job_id);
+            if (sqlite3_exec(db_, "ROLLBACK;", nullptr, nullptr, &errMsg)) {
+                Logger::get_logger()->error("Failed to rollback SQLite update_ready_jobs transaction: {}",
+                                            errMsg ? errMsg : sqlite3_errmsg(db_));
+                sqlite3_free(errMsg);
+            }
+
             sqlite3_finalize(stmt);
             return false;
         }
@@ -894,6 +936,15 @@ bool SQLiteDatabase::update_job_status(const std::string& client_id, const std::
     rc = sqlite3_step(stmt);
     if (rc != SQLITE_DONE) {
         Logger::get_logger()->error("sqlite step failed: {}", sqlite3_errmsg(db_));
+        ret_val = false;
+    }
+
+    if (ret_val && sqlite3_changes(db_) == 0) {
+        Logger::get_logger()->error(
+            "update_job_status - no job row found for client_id={} workflow_id={} job_id={}",
+            client_id,
+            workflow_id,
+            job_id);
         ret_val = false;
     }
 
