@@ -9,8 +9,7 @@
 namespace flow_pilot {
 
 namespace error_msgs {
-
-// Validation Errors dtrings:
+// Validation Errors strings:
 inline constexpr std::string_view  INVALID_JSON_FORMAT = "Invalid JSON format";
 inline constexpr std::string_view  SCHEMA_VALIDATION_FAILED = "Schema validation failed";
 inline constexpr std::string_view  CLIENT_NOT_FOUND = "Client not found";
@@ -31,7 +30,9 @@ inline constexpr std::string_view  RATE_LIMIT_EXCEEDED = "Rate limit exceeded";
 inline constexpr std::string_view  CONCURRENT_WORKFLOW_LIMIT_EXCEEDED = "Concurrent workflow limit exceeded";
 inline constexpr std::string_view  REQUEST_ADMITTED = "Request was admitted";
 inline constexpr std::string_view  WORKFLOW_ADMITTED = "Workflow was validated and admitted";
-
+inline constexpr std::string_view  STATUS_UPDATED_FAILURE = "Failed to update status";
+inline constexpr std::string_view  JOB_EXECUTION_FAILURE = "Job execution failed";
+inline constexpr std::string_view  OK = "OK";
 } // namespace error_msg
 
 enum class StatusCodes {
@@ -54,7 +55,10 @@ enum class StatusCodes {
     RATE_LIMIT_EXCEEDED,
     CONCURRENT_WORKFLOW_LIMIT_EXCEEDED,
     REQUEST_ADMITTED,
-    WORKFLOW_ADMITTED
+    WORKFLOW_ADMITTED,
+    STATUS_UPDATED_FAILURE,
+    JOB_EXECUTION_FAILURE,
+    OK
 };
 
 inline std::string_view status_code_to_string(StatusCodes status_code) {
@@ -99,6 +103,12 @@ inline std::string_view status_code_to_string(StatusCodes status_code) {
             return error_msgs::REQUEST_ADMITTED;
         case StatusCodes::WORKFLOW_ADMITTED:
             return error_msgs::WORKFLOW_ADMITTED;
+        case StatusCodes::STATUS_UPDATED_FAILURE:
+            return error_msgs::STATUS_UPDATED_FAILURE;
+        case StatusCodes::JOB_EXECUTION_FAILURE:
+            return error_msgs::JOB_EXECUTION_FAILURE;
+        case StatusCodes::OK:
+            return error_msgs::OK;
         default:
             return "Unknown status code";
     }

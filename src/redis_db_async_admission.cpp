@@ -1,0 +1,254 @@
+// redis_db_async_admission.cpp - Redis request admission operations for FlowPilot
+
+#include <ctime>
+#include <string>
+#include <vector>
+
+#include "config.h"
+#include "flow_pilot_error_msgs.h"
+#include "logger.h"
+#include "redis_db_async.h"
+
+namespace flow_pilot {
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::request_exists_async(const std::string& client_id, const std::string& request_id) const {
+    std::string key = "fp:req:" + client_id + ":" + request_id;
+    std::vector<std::string> args{"EXISTS", key};
+    long long value = 0;
+    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
+    co_return ok && value > 0;
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::reserve_request_id_async(const std::string& client_id, const std::string& request_id)
+{
+    std::string key = "fp:req:" + client_id + ":" + request_id;
+    co_return co_await command_executor_->execute_set_command_async(key, "VALIDATING", 900, true);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::release_request_id_async(const std::string& client_id, const std::string& request_id)
+{
+    std::string key = "fp:req:" + client_id + ":" + request_id;
+    std::vector<std::string> args{"DEL", key};
+    long long value = 0;
+    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
+    co_return ok;
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::can_accept_request_async(const std::string& client_id,
+                                                                         int max_active_workflows,
+                                                                         int max_requests,
+                                                                         int window_seconds,
+                                                                         std::string& rejection_reason) const
+{
+    auto active_workflows_key = std::string("fp:active:") + client_id + ":workflows";
+    std::vector<std::string> active_args{"SCARD", active_workflows_key};
+    long long active_count_value = 0;
+    auto active_count_ok = co_await command_executor_->execute_integer_command_async(active_args, active_count_value);
+    if (!active_count_ok) {
+        active_count_value = 0;
+    }
+
+    if (active_count_value >= max_active_workflows) {
+        rejection_reason = "Client exceeded the maximum allowed concurrent workflows.";
+        co_return false;
+    }
+
+    long long epoch = static_cast<long long>(std::time(nullptr));
+    std::vector<std::string> keys;
+    keys.reserve(window_seconds);
+    for (int i = 0; i < window_seconds; ++i) {
+        keys.push_back("fp:rate:" + client_id + ":" + std::to_string(epoch - i));
+    }
+
+    std::vector<std::string> counts;
+    auto mget_ok = co_await command_executor_->execute_mget_command_async(keys, counts);
+    long long total_requests = 0;
+    if (mget_ok) {
+        for (const auto& value : counts) {
+            if (!value.empty()) {
+                try {
+                    total_requests += std::stoll(value);
+                } catch (...) {
+                    // ignore parse errors for rate buckets
+                }
+            }
+        }
+    }
+
+    if (total_requests >= max_requests) {
+        rejection_reason = "Rate limit exceeded: too many workflow requests in the recent time window.";
+        co_return false;
+    }
+
+    co_return true;
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::string& client_id,
+                                                                     const std::string& request_id,
+                                                                     const std::string& workflow_id,
+                                                                     int max_active_workflows,
+                                                                     int max_requests,
+                                                                     int window_seconds,
+                                                                     StatusCodes& rejection_reason)
+{
+    std::string request_key = "fp:req:" + client_id + ":" + request_id;
+    std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
+
+    std::vector<std::string> keys;
+    keys.push_back(request_key);
+    keys.push_back(active_workflows_key);
+
+    std::string lua_script = R"lua(
+        -- This Lua script performs atomic admission checks for incoming workflow requests.
+        --
+        -- Redis is the authoritative enforcement mechanism for client request rate limiting.
+        --
+        -- All other Redis checks are admission optimizations intended to reject
+        -- requests early and reduce unnecessary validation and database activity.
+        -- SQLite remains the authoritative source for workflow state, workflow
+        -- identity and request history.
+
+        local request_key = KEYS[1]
+        local active_workflows_key = KEYS[2]
+
+        -- Configuration parameters
+        local max_active_workflows = tonumber(ARGV[1])
+        local max_requests = tonumber(ARGV[2])
+        local window = tonumber(ARGV[3])
+        local key_ttl = tonumber(ARGV[8])
+        
+        -- Request identity parameters
+        local workflow_id = ARGV[4]
+        local client_id = ARGV[5]
+
+        -- Request status parameters
+        local received_status = ARGV[6]
+        local rejected_status = ARGV[7]
+
+        local function reject(reason) 
+            -- set request status to rejected
+            redis.call('SET', request_key, rejected_status, 'XX', 'KEEPTTL') 
+            return {0, reason} 
+        end
+
+        -- Set request key to track it and prevent duplicates
+        local request_set = redis.call('SET', request_key, received_status, 'NX', 'EX', key_ttl)
+        if not request_set then
+            return {0, 'duplicate'}
+        end
+
+        -- Use Redis server time for rate buckets
+        local redis_time = redis.call('TIME')
+        local server_epoch = tonumber(redis_time[1])
+
+        -- Update rate limit bucket using Redis server time
+        local rate_key_server_time = 'fp:rate:' .. client_id .. ':' .. server_epoch
+        local current_rate = redis.call('INCR', rate_key_server_time)
+        if current_rate == 1 then
+            -- expire slightly after the window to ensure correct accounting in case of redis clock skew
+            redis.call('EXPIRE', rate_key_server_time, window + 1)
+        end
+
+        -- Compute total across the window
+        local total = current_rate
+        for i = 1, window - 1 do
+            local historical_key = 'fp:rate:' .. client_id .. ':' .. (server_epoch - i)
+            local value = tonumber(redis.call('GET', historical_key) or '0')
+            total = total + value
+        end
+
+        if total > max_requests then
+            -- rollback rate increment
+            redis.call('DECR', rate_key_server_time)
+            return reject('rate_limit')
+        end
+
+        -- Add workflow_id to active workflows set only after checks
+        local added = redis.call('SADD', active_workflows_key, workflow_id)
+        if added == 1 then
+            -- Active count check after successfully adding a new workflow ID
+            local final_active_count = redis.call('SCARD', active_workflows_key)
+            if final_active_count > max_active_workflows then
+                -- Max concurrent workflows exceeded after adding the new workflow id
+                -- Remove the newly added workflow and rollback rate
+                redis.call('SREM', active_workflows_key, workflow_id)
+                redis.call('DECR', rate_key_server_time)
+                return reject('active_limit')
+            end
+        else
+            redis.call('DECR', rate_key_server_time)
+            return reject('duplicate_workflow')
+        end
+
+        return {1, 'ok'}
+    )lua";
+
+    std::vector<std::string> script_args;
+    script_args.push_back(std::to_string(max_active_workflows));
+    script_args.push_back(std::to_string(max_requests));
+    script_args.push_back(std::to_string(window_seconds));
+    script_args.push_back(workflow_id);
+    script_args.push_back(client_id);
+    script_args.push_back(std::string(to_string(RequestStatus::RECEIVED)));
+    script_args.push_back(std::string(to_string(RequestStatus::REJECTED)));
+    script_args.push_back(std::to_string(Config::get().redis().key_retention_ttl));
+
+    std::vector<std::string> lua_values;
+    auto lua_ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, script_args, lua_values);
+    if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
+        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
+        co_return false;
+    }
+
+    std::string status = lua_values[0];
+    std::string detail = lua_values[1];
+    if (status == "1") {
+        rejection_reason = StatusCodes::REQUEST_ADMITTED;
+        co_return true;
+    }
+
+    if (detail == "duplicate") {
+        rejection_reason = StatusCodes::DUPLICATE_REQUEST;
+    } else if (detail == "rate_limit") {
+        rejection_reason = StatusCodes::RATE_LIMIT_EXCEEDED;
+    } else if (detail == "active_limit") {
+        rejection_reason = StatusCodes::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
+    } else if (detail == "duplicate_workflow") {
+        rejection_reason = StatusCodes::WORKFLOW_ID_EXISTS;
+    } else {
+        Logger::get_logger()->error("Unexpected Lua script failure: {}", detail);
+        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
+    }
+    
+    Logger::get_logger()->error("Request was not admitted due to the following reason: {}", status_code_to_string(rejection_reason));
+    co_return false;
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::update_request_status_async(const std::string& client_id,
+                                                                             const std::string& request_id,
+                                                                             const std::string& status)
+{
+    std::string key = "fp:req:" + client_id + ":" + request_id;
+    co_return co_await command_executor_->execute_set_command_async(key, status, 900, false);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_request_status_async(const std::string& client_id,
+                                                                           const std::string& request_id,
+                                                                           std::string& value) const
+{
+    std::string key = "fp:req:" + client_id + ":" + request_id;
+    std::vector<std::string> args{"GET", key};
+    co_return co_await command_executor_->execute_bulk_string_command_async(args, value);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::remove_active_workflow_async(const std::string& client_id,
+                                                                             const std::string& workflow_id)
+{
+    std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
+    std::vector<std::string> args{"SREM", active_workflows_key, workflow_id};
+    long long value = 0;
+    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
+    co_return ok && value > 0;
+}
+
+} // namespace flow_pilot

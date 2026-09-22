@@ -45,6 +45,11 @@ set(FLOW_PILOT_SOURCES
     src/logger.cpp
     src/redis_command_executor.cpp
     src/redis_db_async.cpp
+    src/redis_db_async_admission.cpp
+    src/redis_db_async_completion.cpp
+    src/redis_db_async_execution_queue.cpp
+    src/redis_db_async_jobs.cpp
+    src/redis_db_async_workflow.cpp
     src/redis_keys.cpp
     src/sqlite_db.cpp
     src/admission_failure_handler.cpp
@@ -57,6 +62,7 @@ set(FLOW_PILOT_SOURCES
     src/http_server.cpp
     src/workflow_runtime_generator.cpp
     src/workflow_admission_service.cpp
+    src/completion_handler.cpp
     src/scheduler.cpp
     src/worker_thread.cpp
 )
@@ -91,6 +97,7 @@ add_executable(flow_pilot_tests
     tests/workflow_validator_test.cpp
     tests/async_sqlite_db_test.cpp
     tests/redis_db_async_validator_test.cpp
+    tests/completion_handler_test.cpp
     tests/scheduler_worker_test.cpp
 )
 

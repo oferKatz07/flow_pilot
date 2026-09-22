@@ -2,11 +2,13 @@
 
 
 #include "logger.h"
+#include "completion_handler.h"
 #include "db_factory.h"
 #include "redis_db_async.h"
 #include "worker_thread.h"
 
 #include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/use_future.hpp>
 
 namespace flow_pilot {
@@ -22,16 +24,29 @@ void WorkerThread::main_worker_loop() {
             break;
         }
 
+        JobCompletionData completion_data;
+        completion_data.identity = job_exe_data.identity;
+        completion_data.job_id = job_exe_data.job_id;
         if (!update_job_status_to_running_sync(job_exe_data)) {
             // Failed to update job status to RUNNING, handle accordingly (e.g., log the error)
-            job_exe_data.status = JobStatus::CANCELED;
+            completion_data.status = JobStatus::CANCELED;
+            completion_data.error_code = StatusCodes::STATUS_UPDATED_FAILURE;
+            // Send the Canceled jobe to the completion handler
+            update_completion_handler(completion_data);
             continue;
         }
 
         if (!execute_job(job_exe_data)) {
             // Job execution failed, handle accordingly (e.g., log the error)
-            continue;
+            completion_data.status = JobStatus::FAILED;
+            completion_data.error_code = StatusCodes::JOB_EXECUTION_FAILURE;
+        } else {
+            // Job executed successfully
+            completion_data.status = JobStatus::COMPLETED;
+            completion_data.error_code = StatusCodes::OK;
         }
+
+        update_completion_handler(completion_data);
     }
 }
 
@@ -75,6 +90,20 @@ bool WorkerThread::execute_job(const JobExeData& job_exe_data) {
                                job_exe_data.job_id, job_exe_data.identity.workflow_id);
     sleep(1); // Simulate job execution time
     return true;
+}
+
+void WorkerThread::update_completion_handler(const JobCompletionData& completion_data) {
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    boost::asio::co_spawn(
+        redis_db->io_context(),
+        [completion_data, redis_db]() -> boost::asio::awaitable<void> {
+            if (!co_await redis_db->enqueue_job_completion_async(completion_data)) {
+                Logger::get_logger()->error("Failed to enqueue completion message for job: {} in workflow: {}",
+                                             completion_data.job_id, completion_data.identity.workflow_id);
+            }
+            co_return;
+        },
+        boost::asio::detached);
 }
 
 } // namespace flow_pilot

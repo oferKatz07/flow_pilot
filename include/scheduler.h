@@ -31,6 +31,7 @@ public:
     bool fetch_job(JobExeData& job_exe_data) override;
 
 private:
+    void start();
     void stop() {
         running_.store(false, std::memory_order_release);
     }
@@ -41,6 +42,7 @@ private:
 
     const std::string scheduler_uuid_;
     ThreadSafeBlockingQueue<JobExeData> worker_thread_queue_;
+    std::thread scheduler_thread_;
     std::vector<std::thread> worker_threads_;
     std::atomic<bool> running_;
     std::atomic<bool> main_loop_started_{false};

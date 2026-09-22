@@ -93,6 +93,16 @@ boost::asio::awaitable<void> queue_ready_jobs_after_delay(std::shared_ptr<RedisD
     co_await redis->queue_workflow_jobs_for_execution_async(workflow_id, ready_jobs);
 }
 
+boost::asio::awaitable<void> enqueue_completion_after_delay(std::shared_ptr<RedisDatabaseAsync> redis,
+                                                            JobCompletionData completion,
+                                                            std::chrono::milliseconds delay)
+{
+    auto executor = co_await boost::asio::this_coro::executor;
+    boost::asio::steady_timer timer(executor, delay);
+    co_await timer.async_wait(boost::asio::use_awaitable);
+    co_await redis->enqueue_job_completion_async(completion);
+}
+
 } // namespace
 
 static JobRuntimeData make_job_runtime(const std::string& job_id,
@@ -389,6 +399,129 @@ TEST_F(RedisDatabaseAsyncValidatorTest, EnqueueReadyJobDoesNotCreateJobHash)
     EXPECT_EQ(exists, 0);
 }
 
+TEST_F(RedisDatabaseAsyncValidatorTest, CompletionStreamEmptyDequeueReturnsNoMessage)
+{
+    long long deleted = 0;
+    std::vector<std::string> delete_args{"DEL", "fp:job_completion_stream"};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(delete_args, deleted)));
+
+    JobCompletionData completion;
+    completion.stream_id = "stale";
+    completion.identity = {"stale-client", "stale-workflow"};
+    completion.job_id = "stale-job";
+    completion.status = JobStatus::COMPLETED;
+
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_completion_async(completion)));
+    EXPECT_TRUE(completion.stream_id.empty());
+    EXPECT_TRUE(completion.identity.client_id.empty());
+    EXPECT_TRUE(completion.identity.workflow_id.empty());
+    EXPECT_TRUE(completion.job_id.empty());
+    EXPECT_EQ(completion.status, JobStatus::UNKNOWN);
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, CompletionStreamEnqueueAndDequeueRoundtrip)
+{
+    long long deleted = 0;
+    std::vector<std::string> delete_args{"DEL", "fp:job_completion_stream"};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(delete_args, deleted)));
+
+    JobCompletionData expected;
+    expected.identity = {"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    expected.job_id = "job-" + generate_unique_id();
+    expected.status = JobStatus::FAILED;
+    expected.error_code = StatusCodes::JOB_EXECUTION_FAILURE;
+
+    ASSERT_TRUE(run_async(ioc_, redis_->enqueue_job_completion_async(expected)));
+
+    JobCompletionData actual;
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_completion_async(actual)));
+    EXPECT_FALSE(actual.stream_id.empty());
+    EXPECT_EQ(actual.identity.client_id, expected.identity.client_id);
+    EXPECT_EQ(actual.identity.workflow_id, expected.identity.workflow_id);
+    EXPECT_EQ(actual.job_id, expected.job_id);
+    EXPECT_EQ(actual.status, expected.status);
+    EXPECT_EQ(actual.error_code, expected.error_code);
+
+    JobCompletionData empty;
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_completion_async(empty)));
+    EXPECT_TRUE(empty.stream_id.empty());
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, CompletionStreamDequeuesOldestMessageFirst)
+{
+    long long deleted = 0;
+    std::vector<std::string> delete_args{"DEL", "fp:job_completion_stream"};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(delete_args, deleted)));
+
+    JobCompletionData first;
+    first.identity = {"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    first.job_id = "job-a";
+    first.status = JobStatus::COMPLETED;
+    first.error_code = StatusCodes::OK;
+
+    JobCompletionData second = first;
+    second.job_id = "job-b";
+    second.status = JobStatus::CANCELED;
+    second.error_code = StatusCodes::STATUS_UPDATED_FAILURE;
+
+    ASSERT_TRUE(run_async(ioc_, redis_->enqueue_job_completion_async(first)));
+    ASSERT_TRUE(run_async(ioc_, redis_->enqueue_job_completion_async(second)));
+
+    JobCompletionData actual;
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_completion_async(actual)));
+    EXPECT_EQ(actual.job_id, first.job_id);
+    EXPECT_EQ(actual.status, first.status);
+    EXPECT_EQ(actual.error_code, first.error_code);
+
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_completion_async(actual)));
+    EXPECT_EQ(actual.job_id, second.job_id);
+    EXPECT_EQ(actual.status, second.status);
+    EXPECT_EQ(actual.error_code, second.error_code);
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, CompletionStreamEventWakesWaitingHandler)
+{
+    long long deleted = 0;
+    std::vector<std::string> delete_args{"DEL", "fp:job_completion_stream"};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(delete_args, deleted)));
+
+    JobCompletionData completion;
+    completion.identity = {"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    completion.job_id = "job-" + generate_unique_id();
+    completion.status = JobStatus::COMPLETED;
+    completion.error_code = StatusCodes::OK;
+
+    auto wait_future = boost::asio::co_spawn(
+        ioc_,
+        redis_->wait_for_job_completion_event_async(std::chrono::seconds(2)),
+        boost::asio::use_future);
+    boost::asio::co_spawn(
+        ioc_,
+        enqueue_completion_after_delay(redis_, completion, std::chrono::milliseconds(50)),
+        boost::asio::detached);
+
+    ASSERT_TRUE(run_until_future_ready(ioc_, wait_future, std::chrono::seconds(2)));
+    EXPECT_EQ(wait_future.get(), JobCompletionWaitResult::EVENT);
+
+    JobCompletionData actual;
+    ASSERT_TRUE(run_async(ioc_, redis_->dequeue_job_completion_async(actual)));
+    EXPECT_EQ(actual.identity.client_id, completion.identity.client_id);
+    EXPECT_EQ(actual.identity.workflow_id, completion.identity.workflow_id);
+    EXPECT_EQ(actual.job_id, completion.job_id);
+    EXPECT_EQ(actual.status, completion.status);
+    EXPECT_EQ(actual.error_code, completion.error_code);
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, CompletionStreamWaitReportsTimeout)
+{
+    long long deleted = 0;
+    std::vector<std::string> delete_args{"DEL", "fp:job_completion_stream"};
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(delete_args, deleted)));
+
+    EXPECT_EQ(run_async(ioc_, redis_->wait_for_job_completion_event_async(std::chrono::milliseconds(10))),
+              JobCompletionWaitResult::TIMEOUT);
+}
+
 TEST_F(RedisDatabaseAsyncValidatorTest, RawZsetDequeuePopsQueuedEntryThatIsNotAHash)
 {
     run_async(ioc_, redis_->clear_execution_queue_async());
@@ -625,13 +758,8 @@ TEST_F(RedisDatabaseAsyncValidatorTest, SchedulerWithSingleWorkerDequeuesReadyJo
         ioc_.run();
     });
 
-    std::future<void> main_loop_future;
     {
         scheduler test_scheduler(1, 1);
-        main_loop_future = boost::asio::co_spawn(
-            ioc_,
-            test_scheduler.scheduler_main_loop(),
-            boost::asio::use_future);
 
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         bool dequeued = false;
@@ -655,9 +783,6 @@ TEST_F(RedisDatabaseAsyncValidatorTest, SchedulerWithSingleWorkerDequeuesReadyJo
 
     work_guard.reset();
     io_thread.join();
-
-    ASSERT_EQ(main_loop_future.wait_for(std::chrono::seconds(0)), std::future_status::ready);
-    EXPECT_NO_THROW(main_loop_future.get());
 
     run_async(ioc_, redis_->clear_execution_queue_async());
     ASSERT_TRUE(run_async(ioc_, redis_->delete_job_payload_async(workflow_id, job_id)));

@@ -3,11 +3,15 @@
 
 #include "scheduler.h"
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
+#include <boost/asio/use_future.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <chrono>
+#include <future>
 
 namespace flow_pilot {
 
@@ -25,16 +29,22 @@ scheduler::scheduler(std::size_t worker_thread_count, std::size_t worker_queue_c
             worker.main_worker_loop();
         });
     }
+
+    start();
 }
 
 scheduler::~scheduler() {
     stop();
 
-    // Wake workers blocked on an empty/full queue before waiting for the dispatcher.
+    // Wake workers blocked on an empty/full queue and the dispatcher blocked in Redis.
     worker_thread_queue_.close();
+    RedisDatabaseAsync::get_instance()->deregister_scheduler(scheduler_uuid_);
 
     wait_for_main_loop_finished();
-    RedisDatabaseAsync::get_instance()->deregister_scheduler(scheduler_uuid_);
+
+    if (scheduler_thread_.joinable()) {
+        scheduler_thread_.join();
+    }
 
     // Join threads to wait for completion
     for (auto& t : worker_threads_) {
@@ -50,7 +60,7 @@ boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
 
     while (running_.load(std::memory_order_acquire)) {
         JobExeData job_info;
-        // Waite for the next ready job from the redis execution queue
+        // Wait for the next ready job from the redis execution queue
         if (!co_await get_next_ready_job(job_info)) {
             break;
         }
@@ -60,6 +70,7 @@ boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
         }
 
         // Get the job payload from the workflow runtime data
+        // TBD check return status and handle errors
         co_await redis_db->fetch_job_payload_async(job_info.identity, job_info.job_id, job_info.payload);
 
         if (!worker_thread_queue_.push(std::move(job_info))) {
@@ -77,6 +88,24 @@ bool scheduler::fetch_job(JobExeData& job_exe_data) {
 ////////////////////////////////////////////////////////////////////////////////////
 //                                 Private Methods                                //
 ////////////////////////////////////////////////////////////////////////////////////
+void scheduler::start() {
+    scheduler_thread_ = std::thread([this]() {
+        auto redis_db = RedisDatabaseAsync::get_instance();
+        auto& ioc = redis_db->io_context();
+        auto work_guard = boost::asio::make_work_guard(ioc);
+        auto main_loop_future = boost::asio::co_spawn(
+            ioc,
+            scheduler_main_loop(),
+            boost::asio::use_future);
+
+        while (main_loop_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            ioc.run_for(std::chrono::milliseconds(50));
+        }
+
+        main_loop_future.get();
+    });
+}
+
 void scheduler::mark_main_loop_finished() {
     {
         std::lock_guard<std::mutex> lock(main_loop_finished_mutex_);
@@ -104,6 +133,7 @@ boost::asio::awaitable<bool> scheduler::get_next_ready_job(JobExeData& job_info)
         }
 
         if (!running_.load(std::memory_order_acquire)) {
+            // If the scheduler is stopping, exit the loop and return false
             co_return false;
         }
 

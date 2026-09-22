@@ -22,6 +22,8 @@ struct JobExeData {
     JobStatus status;
 };
 
+struct JobCompletionData;
+
 class IJobFetcher {
 public:
     virtual ~IJobFetcher() = default;
@@ -38,6 +40,7 @@ public:
 protected:
     virtual bool update_job_status_to_running_sync(const JobExeData& job_exe_data);
     virtual bool execute_job(const JobExeData& job_exe_data);
+    virtual void update_completion_handler(const JobCompletionData& completion_data);
 
 private:
     boost::asio::awaitable<bool> update_job_status_to_running(const JobExeData& job_exe_data);

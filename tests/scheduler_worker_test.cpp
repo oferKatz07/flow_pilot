@@ -52,8 +52,13 @@ protected:
         return true;
     }
 
+    void update_completion_handler(const JobCompletionData&) override {
+        completed_jobs_.fetch_add(1);
+    }
+
 private:
     std::atomic<int> executed_jobs_{0};
+    std::atomic<int> completed_jobs_{0};
     bool start_transition_succeeds_;
 };
 

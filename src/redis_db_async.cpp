@@ -1,36 +1,32 @@
-
-// redis_db_async.cpp - Redis communication implementation for FlowPilot
+// redis_db_async.cpp - Redis connection implementation for FlowPilot
 
 #include <boost/asio.hpp>
 #include <boost/asio/connect.hpp>
-#include <boost/asio/co_spawn.hpp>
 #include <boost/asio/ip/tcp.hpp>
 #include <boost/asio/read_until.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <boost/asio/write.hpp>
-#include <nlohmann/json.hpp>
-#include <sstream>
+#include <atomic>
 #include <chrono>
-#include <ctime>
+#include <sstream>
 #include <string_view>
 #include <utility>
+#include <vector>
 
-#include "flow_pilot_error_msgs.h"
-#include "logger.h"
 #include "config.h"
-#include "database_models.h"
-#include "db_interface.h"
+#include "logger.h"
 #include "redis_db_async.h"
 
 namespace flow_pilot {
 
 using boost::asio::use_awaitable;
-using json = nlohmann::json;
 
 namespace {
 
 constexpr const char* EXECUTION_QUEUE_KEY = "fp:execution_queue";
 constexpr const char* EXECUTION_QUEUE_READY_CHANNEL = "fp:execution_queue:ready";
+constexpr const char* JOB_COMPLETION_STREAM_KEY = "fp:job_completion_stream";
+constexpr const char* JOB_COMPLETION_READY_CHANNEL = "fp:job_completion_stream:ready";
 
 std::string trim_crlf(std::string line)
 {
@@ -134,15 +130,6 @@ struct RedisDatabaseAsync::ImplAsync {
         socket_.close(ec);
     }
 
-    boost::asio::awaitable<void> wait_for_pubsub_message_async(const std::string& channel)
-    {
-        if (!co_await subscribe_async(channel)) {
-            throw RedisParseException("Invalid Redis SUBSCRIBE reply");
-        }
-
-        co_await wait_for_subscribed_pubsub_message_async(channel);
-    }
-
     boost::asio::awaitable<bool> subscribe_async(const std::string& channel)
     {
         std::vector<std::string> subscribe_args{"SUBSCRIBE", channel};
@@ -210,7 +197,11 @@ private:
 
                 std::size_t required_bytes = static_cast<std::size_t>(length + 2);
                 if (read_buffer_.size() < required_bytes) {
-                    co_await boost::asio::async_read(socket_, read_buffer_, boost::asio::transfer_exactly(required_bytes - read_buffer_.size()), use_awaitable);
+                    co_await boost::asio::async_read(
+                        socket_,
+                        read_buffer_,
+                        boost::asio::transfer_exactly(required_bytes - read_buffer_.size()),
+                        use_awaitable);
                 }
 
                 std::istream response_stream(&read_buffer_);
@@ -272,10 +263,10 @@ RedisDatabaseAsync::RedisDatabaseAsync(boost::asio::io_context& ioc)
           }))
 {
     const InMemoryDBConfig& config = Config::get().redis();
-        std::string connection_string = config.host + ":" + std::to_string(config.port);
-        if (!connect(connection_string, config.password)) {
-            throw std::runtime_error("Unable to connect to Redis at " + connection_string);
-        }
+    std::string connection_string = config.host + ":" + std::to_string(config.port);
+    if (!connect(connection_string, config.password)) {
+        throw std::runtime_error("Unable to connect to Redis at " + connection_string);
+    }
 }
 
 RedisDatabaseAsync::~RedisDatabaseAsync() = default;
@@ -344,12 +335,6 @@ bool RedisDatabaseAsync::connect(const std::string& connection_string, const std
         Logger::get_logger()->error("Redis connection failed: {}", error_message);
         return false;
     }
-    // TBD Authentication is deffered to a later phase.
-    // The password is currently empty and we want to allow connecting without authentication first.
-    // if (!impl_async_->authenticate(auth_password, error_message)) {
-    //     Logger::get_logger()->error("Redis authentication failed: {}", error_message);
-    //     return false;
-    // }
 
     connection_string_ = connection_string;
     host_ = host;
@@ -394,456 +379,12 @@ void RedisDatabaseAsync::deregister_scheduler(const std::string& scheduler_id)
     }
 }
 
-boost::asio::awaitable<bool> RedisDatabaseAsync::request_exists_async(const std::string& client_id, const std::string& request_id) const {
-    std::string key = "fp:req:" + client_id + ":" + request_id;
-    std::vector<std::string> args{"EXISTS", key};
-    long long value = 0;
-    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-    co_return ok && value > 0;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::reserve_request_id_async(const std::string& client_id, const std::string& request_id)
-{
-    std::string key = "fp:req:" + client_id + ":" + request_id;
-    co_return co_await command_executor_->execute_set_command_async(key, "VALIDATING", 900, true);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::release_request_id_async(const std::string& client_id, const std::string& request_id)
-{
-    std::string key = "fp:req:" + client_id + ":" + request_id;
-    std::vector<std::string> args{"DEL", key};
-    long long value = 0;
-    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-    co_return ok;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::can_accept_request_async(const std::string& client_id,
-                                                                         int max_active_workflows,
-                                                                         int max_requests,
-                                                                         int window_seconds,
-                                                                         std::string& rejection_reason) const
-{
-    auto active_workflows_key = std::string("fp:active:") + client_id + ":workflows";
-    std::vector<std::string> active_args{"SCARD", active_workflows_key};
-    long long active_count_value = 0;
-    auto active_count_ok = co_await command_executor_->execute_integer_command_async(active_args, active_count_value);
-    if (!active_count_ok) {
-        active_count_value = 0;
-    }
-
-    if (active_count_value >= max_active_workflows) {
-        rejection_reason = "Client exceeded the maximum allowed concurrent workflows.";
-        co_return false;
-    }
-
-    long long epoch = static_cast<long long>(std::time(nullptr));
-    std::vector<std::string> keys;
-    keys.reserve(window_seconds);
-    for (int i = 0; i < window_seconds; ++i) {
-        keys.push_back("fp:rate:" + client_id + ":" + std::to_string(epoch - i));
-    }
-
-    std::vector<std::string> counts;
-    auto mget_ok = co_await command_executor_->execute_mget_command_async(keys, counts);
-    long long total_requests = 0;
-    if (mget_ok) {
-        for (const auto& value : counts) {
-            if (!value.empty()) {
-                try {
-                    total_requests += std::stoll(value);
-                } catch (...) {
-                    // ignore parse errors for rate buckets
-                }
-            }
-        }
-    }
-
-    if (total_requests >= max_requests) {
-        rejection_reason = "Rate limit exceeded: too many workflow requests in the recent time window.";
-        co_return false;
-    }
-
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::admit_request_async(const std::string& client_id,
-                                                                     const std::string& request_id,
-                                                                     const std::string& workflow_id,
-                                                                     int max_active_workflows,
-                                                                     int max_requests,
-                                                                     int window_seconds,
-                                                                     StatusCodes& rejection_reason)
-{
-    std::string request_key = "fp:req:" + client_id + ":" + request_id;
-    std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
-
-    std::vector<std::string> keys;
-    keys.push_back(request_key);
-    keys.push_back(active_workflows_key);
-
-    std::string lua_script = R"lua(
-        -- This Lua script performs atomic admission checks for incoming workflow requests.
-        --
-        -- Redis is the authoritative enforcement mechanism for client request rate limiting.
-        --
-        -- All other Redis checks are admission optimizations intended to reject
-        -- requests early and reduce unnecessary validation and database activity.
-        -- SQLite remains the authoritative source for workflow state, workflow
-        -- identity and request history.
-
-        local request_key = KEYS[1]
-        local active_workflows_key = KEYS[2]
-
-        -- Configuration parameters
-        local max_active_workflows = tonumber(ARGV[1])
-        local max_requests = tonumber(ARGV[2])
-        local window = tonumber(ARGV[3])
-        local key_ttl = tonumber(ARGV[8])
-        
-        -- Request identity parameters
-        local workflow_id = ARGV[4]
-        local client_id = ARGV[5]
-
-        -- Request status parameters
-        local received_status = ARGV[6]
-        local rejected_status = ARGV[7]
-
-        local function reject(reason) 
-            -- set request status to rejected
-            redis.call('SET', request_key, rejected_status, 'XX', 'KEEPTTL') 
-            return {0, reason} 
-        end
-
-        -- Set request key to track it and prevent duplicates
-        local request_set = redis.call('SET', request_key, received_status, 'NX', 'EX', key_ttl)
-        if not request_set then
-            return {0, 'duplicate'}
-        end
-
-        -- Use Redis server time for rate buckets
-        local redis_time = redis.call('TIME')
-        local server_epoch = tonumber(redis_time[1])
-
-        -- Update rate limit bucket using Redis server time
-        local rate_key_server_time = 'fp:rate:' .. client_id .. ':' .. server_epoch
-        local current_rate = redis.call('INCR', rate_key_server_time)
-        if current_rate == 1 then
-            -- expire slightly after the window to ensure correct accounting in case of redis clock skew
-            redis.call('EXPIRE', rate_key_server_time, window + 1)
-        end
-
-        -- Compute total across the window
-        local total = current_rate
-        for i = 1, window - 1 do
-            local historical_key = 'fp:rate:' .. client_id .. ':' .. (server_epoch - i)
-            local value = tonumber(redis.call('GET', historical_key) or '0')
-            total = total + value
-        end
-
-        if total > max_requests then
-            -- rollback rate increment
-            redis.call('DECR', rate_key_server_time)
-            return reject('rate_limit')
-        end
-
-        -- Add workflow_id to active workflows set only after checks
-        local added = redis.call('SADD', active_workflows_key, workflow_id)
-        if added == 1 then
-            -- Active count check after successfully adding a new workflow ID
-            local final_active_count = redis.call('SCARD', active_workflows_key)
-            if final_active_count > max_active_workflows then
-                -- Max concurrent workflows exceeded after adding the new workflow id
-                -- Remove the newly added workflow and rollback rate
-                redis.call('SREM', active_workflows_key, workflow_id)
-                redis.call('DECR', rate_key_server_time)
-                return reject('active_limit')
-            end
-        else
-            redis.call('DECR', rate_key_server_time)
-            return reject('duplicate_workflow')
-        end
-
-        return {1, 'ok'}
-    )lua";
-
-    std::vector<std::string> script_args;
-    // Add the configured client policy rate limit parameters
-    script_args.push_back(std::to_string(max_active_workflows));
-    script_args.push_back(std::to_string(max_requests));
-    script_args.push_back(std::to_string(window_seconds));
-    // Add request identity parameters
-    script_args.push_back(workflow_id);
-    script_args.push_back(client_id);
-    // Add request status parametrs
-    script_args.push_back(std::string(to_string(RequestStatus::RECEIVED)));
-    script_args.push_back(std::string(to_string(RequestStatus::REJECTED)));
-    // Add configured Redis key TTL 
-    script_args.push_back(std::to_string(Config::get().redis().key_retention_ttl));
-
-    std::vector<std::string> lua_values;
-    auto lua_ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, script_args, lua_values);
-    if (!lua_ok || lua_values.size() < 2 || lua_values[0].empty()) {
-        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
-        co_return false;
-    }
-
-    std::string status = lua_values[0];
-    std::string detail = lua_values[1];
-    if (status == "1") {
-        rejection_reason = StatusCodes::REQUEST_ADMITTED;
-        co_return true;
-    }
-
-    if (detail == "duplicate") {
-        rejection_reason = StatusCodes::DUPLICATE_REQUEST;
-    } else if (detail == "rate_limit") {
-        rejection_reason = StatusCodes::RATE_LIMIT_EXCEEDED;
-    } else if (detail == "active_limit") {
-        rejection_reason = StatusCodes::CONCURRENT_WORKFLOW_LIMIT_EXCEEDED;
-    } else if (detail == "duplicate_workflow") {
-        rejection_reason = StatusCodes::WORKFLOW_ID_EXISTS;
-    } else {
-        Logger::get_logger()->error("Unexpected Lua script failure: {}", detail);
-        rejection_reason = StatusCodes::INTERNAL_DB_FAILURE;
-    }
-    
-    Logger::get_logger()->error("Request was not admitted due to the following reason: {}", status_code_to_string(rejection_reason));
-    co_return false;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::update_request_status_async(const std::string& client_id,
-                                                                             const std::string& request_id,
-                                                                             const std::string& status)
-{
-    std::string key = "fp:req:" + client_id + ":" + request_id;
-    co_return co_await command_executor_->execute_set_command_async(key, status, 900, false);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_request_status_async(const std::string& client_id,
-                                                                           const std::string& request_id,
-                                                                           std::string& value) const
-{
-    std::string key = "fp:req:" + client_id + ":" + request_id;
-    std::vector<std::string> args{"GET", key};
-    co_return co_await command_executor_->execute_bulk_string_command_async(args, value);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::remove_active_workflow_async(const std::string& client_id,
-                                                                             const std::string& workflow_id)
-{
-    std::string active_workflows_key = "fp:active:" + client_id + ":workflows";
-    std::vector<std::string> args{"SREM", active_workflows_key, workflow_id};
-    long long value = 0;
-    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-    co_return ok && value > 0;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::try_acquire_job_slot_async(const WorkflowIdentity& workflow_id, std::string& workflow_status)
-{
-    const auto workflow_key = RedisKeys::workflow_key(workflow_id);
-    const std::vector<std::string> keys{workflow_key};
-    const std::string lua_script = R"lua(
-        local workflow_key = KEYS[1]
-        local status = redis.call('HGET', workflow_key, 'status') or 'UNKNOWN'
-        if status == 'READY' or status == 'RUNNING' then
-            local running_jobs = tonumber(redis.call('HGET', workflow_key, 'reserved_execution_slots') or '0')
-            local max_concurrent_jobs = tonumber(redis.call('HGET', workflow_key, 'max_concurrent_jobs'))
-
-            if running_jobs < max_concurrent_jobs then
-                redis.call('HINCRBY', workflow_key, 'reserved_execution_slots', 1)
-
-                return {1, status}
-            end
-
-            return {0, status}
-        end
-        -- If the workflow status is not READY or RUNNING return false
-        return {0, status}
-    )lua";
-
-    std::vector<std::string> values;
-    const auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, {}, values);
-    bool ret_val = ok && values.size() == 2 && values[0] == "1";
-    if (values.size() == 2) {
-        workflow_status = values[1];
-    } else {
-        workflow_status = to_string(WorkflowStatus::UNKNOWN);
-    }
-
-    co_return ret_val;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::create_workflow_runtime_data_async(const WorkflowRuntimeInfo& workflow_info) {
-    if (!co_await set_workflow_runtime_async(workflow_info.identity, workflow_info.workflow)) {
-        co_await delete_workflow_runtime_async(workflow_info.identity);
-        co_return false;
-    }
-
-    for (const auto& job_data : workflow_info.jobs) {
-        if (!co_await set_job_runtime_async(workflow_info.identity, job_data)) {
-            co_await delete_all_workflow_jobs_async(workflow_info.identity, workflow_info.jobs);
-            co_await delete_workflow_runtime_async(workflow_info.identity);
-
-            co_return false;
-        }
-    }
-
-    if (workflow_info.ready_job_list.size() > 0) {
-        if (!co_await create_workflow_waiting_ready_jobs(workflow_info.identity, workflow_info.ready_job_list)) {
-            co_await delete_all_workflow_jobs_async(workflow_info.identity, workflow_info.jobs);
-            co_await delete_workflow_runtime_async(workflow_info.identity);
-            co_return false;
-        }
-    }
-
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::delete_workflow_runtime_data_async(const WorkflowRuntimeInfo& workflow_info) {
-    bool ret_val = true;
-    if (!co_await delete_all_workflow_jobs_async(workflow_info.identity, workflow_info.jobs)) {
-        ret_val = false;
-    }
-
-    if (!co_await delete_workflow_runtime_async(workflow_info.identity)) {
-        ret_val = false;
-    }
-
-    if (! co_await delete_workflow_waiting_ready_jobs(workflow_info.identity)) {
-        ret_val = false;
-    }
-
-    co_return ret_val;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::set_workflow_runtime_async(const WorkflowIdentity& workflow_id, 
-                                                                            const WorkflowRuntimeData& workflow_data) {
-    const std::string workflow_key = RedisKeys::workflow_key(workflow_id);
-    std::string creation_time = std::to_string(std::time(nullptr));
-    std::unordered_map<std::string, std::string> fields{
-        {"status", workflow_data.status},
-        {"total_jobs", std::to_string(workflow_data.total_jobs)},
-        {"max_concurrent_jobs", std::to_string(workflow_data.max_concurrent_jobs)},
-        {"reserved_execution_slots", std::to_string(workflow_data.reserved_execution_slots)},
-        {"pending_jobs", std::to_string(workflow_data.pending_jobs)},
-        {"completed_jobs",std::to_string(0)},
-        {"failed_jobs", std::to_string(0)},
-        {"max_run_time", std::to_string(workflow_data.max_runtime_sec)},
-        {"creation_time", creation_time},
-        {"start_run_time", ""},
-        {"last_update_time", creation_time}
-    };
-
-    co_return co_await command_executor_->execute_hset_command_async(workflow_key, fields);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::update_workflow_runtime_async(
-     const WorkflowIdentity& workflow_id,
-    const std::unordered_map<std::string, std::string>& fields) {
-    const auto workflow_key = RedisKeys::workflow_key(workflow_id);
-    std::vector<std::string> keys{workflow_key};
-    std::vector<std::string> args;
-    args.push_back(std::to_string(fields.size()));
-    for (const auto& [field, value] : fields) {
-        args.push_back(field);
-        args.push_back(value);
-    }
-
-    std::string lua_script = R"lua(
-        local workflow_key = KEYS[1]
-        local field_count = tonumber(ARGV[1])
-        local idx = 2
-        for i = 1, field_count do
-            local field_name = ARGV[idx]
-            local field_value = ARGV[idx + 1]
-            redis.call('HSET', workflow_key, field_name, field_value)
-            idx = idx + 2
-        end
-        return {1}
-    )lua";
-
-    std::vector<std::string> lua_values;
-    auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, args, lua_values);
-    co_return ok && !lua_values.empty() && lua_values[0] == "1";
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_workflow_runtime_async(
-    const WorkflowIdentity& workflow_id,
-    std::unordered_map<std::string, std::string>& workflow_data) const {
-    const auto workflow_key = RedisKeys::workflow_key(workflow_id);
-    co_return co_await command_executor_->execute_hgetall_command_async(workflow_key, workflow_data);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::queue_workflow_jobs_for_execution_async(const WorkflowIdentity& workflow_id,
-                                                                                         const PrioritizedJobsList& queued_jobs) {
-    std::unordered_map<std::string, unsigned int> members;
-
-    for (const auto& job_info : queued_jobs) {
-        const auto job_key = RedisKeys::job_key(workflow_id, job_info.job_id);
-        members[job_key] = job_info.priority;
-    }
-
-    if (members.empty()) {
-        co_return true;
-    }
-
-    if (!co_await command_executor_->execute_zset_enqueue_command_async(EXECUTION_QUEUE_KEY, members)) {
-        co_return false;
-    }
-
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::remove_jobs_from_execution_queue_async(const WorkflowIdentity& workflow_id,
-                                                                                        const PrioritizedJobsList& queued_jobs) {
-    std::vector<std::string> members;
-    members.reserve(queued_jobs.size());
-
-    for (const auto& job_info : queued_jobs) {
-        members.push_back(RedisKeys::job_key(workflow_id, job_info.job_id));
-    }
-    co_return co_await command_executor_->execute_zset_remove_command_async(EXECUTION_QUEUE_KEY, std::move(members));
-}
-
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
-                                                                                    const PrioritizedJobsList& ready_jobs) {
-    std::string waiting_ready_job_key = RedisKeys::workflow_waiting_jobs_key(workflow_id);
-    std::unordered_map<std::string, unsigned int> members;
-
-    for (const auto& job_info : ready_jobs) {
-         const auto job_key = RedisKeys::job_key(workflow_id, job_info.job_id);
-        members[job_key] = job_info.priority;
-    }
-    co_return co_await command_executor_->execute_zset_enqueue_command_async(waiting_ready_job_key, members);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) {
-    std::string waiting_ready_job_key = RedisKeys::workflow_waiting_jobs_key(workflow_id);
-    std::vector<std::string> args{"DEL", waiting_ready_job_key};
-    long long value = 0;
-    co_return co_await command_executor_->execute_integer_command_async(args, value);
-}
-
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::enqueue_job_for_execution_async(const WorkflowIdentity& workflow_id, 
-                                                                                 const PrioritizedJob& ready_job) {
-    std::unordered_map<std::string, unsigned int> members;
-    const auto job_key = RedisKeys::job_key(workflow_id, ready_job.job_id);
-
-    members[job_key] = ready_job.priority;
-
-    if (!co_await command_executor_->execute_zset_enqueue_command_async(EXECUTION_QUEUE_KEY, members)) {
-        co_return false;
-    }
-
-    co_return true;
-}
-
 boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execution_async(
     WorkflowIdentity& workflow_id,
     std::string& ready_job,
     std::string scheduler_id) {
+    // Each scheduler owns a dedicated Redis connection for blocking queue reads, so
+    // the normal command executor is never tied up waiting for work to arrive.
     std::shared_ptr<ImplAsync> blocking_client;
     {
         std::lock_guard<std::mutex> lock(scheduler_clients_mutex_);
@@ -866,6 +407,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
 
     std::string ready_job_key;
     while (true) {
+        // Block for up to one second waiting for the next prioritized job key.
+        // An empty key is a timeout/no-work result, not a failure, so keep polling.
         if (!co_await blocking_executor.execute_zset_blocking_dequeue_command_async(EXECUTION_QUEUE_KEY, ready_job_key, 1)) {
             co_return false;
         }
@@ -874,6 +417,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
             continue;
         }
 
+        // The queue stores Redis job hash keys. If a dequeued key was deleted by
+        // cancellation/cleanup before we inspect it, ignore it and wait again.
         std::string job_type;
         std::vector<std::string> type_args{"TYPE", ready_job_key};
         if (!co_await blocking_executor.execute_bulk_string_command_async(type_args, job_type)) {
@@ -909,7 +454,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
 
         str_size = substr_end_pos - substr_start_pos;
         std::string client_id = ready_job_key.substr(substr_start_pos, str_size);
-        substr_start_pos = substr_end_pos +1;
+        substr_start_pos = substr_end_pos + 1;
 
         substr_end_pos = ready_job_key.find(":", substr_start_pos);
         if (substr_end_pos == std::string::npos) {
@@ -920,7 +465,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
 
         str_size = substr_end_pos - substr_start_pos;
         std::string workflow_id_value = ready_job_key.substr(substr_start_pos, str_size);
-        substr_start_pos = substr_end_pos +1;
+        substr_start_pos = substr_end_pos + 1;
 
         std::string job_id = ready_job_key.substr(substr_start_pos);
         if (client_id.empty() || workflow_id_value.empty() || job_id.empty()) {
@@ -992,299 +537,72 @@ boost::asio::awaitable<void> RedisDatabaseAsync::wait_for_ready_job_event_async(
     }
 }
 
-boost::asio::awaitable<void> RedisDatabaseAsync::clear_execution_queue_async() {
-    std::vector<std::string> args{"DEL", EXECUTION_QUEUE_KEY};
-    long long value = 0;
-    co_await command_executor_->execute_integer_command_async(args, value);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::get_execution_queue_size_async(long long& size) const {
-    std::string queue_type;
-    std::vector<std::string> type_args{"TYPE", EXECUTION_QUEUE_KEY};
-    if (!co_await command_executor_->execute_bulk_string_command_async(type_args, queue_type)) {
-        size = 0;
-        co_return false;
+boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job_completion_event_async(
+    std::chrono::milliseconds timeout)
+{
+    ImplAsync subscriber(ioc_);
+    std::string error_message;
+    if (!subscriber.connect(host_, port_, error_message)) {
+        Logger::get_logger()->error("wait_for_job_completion_event_async - failed to connect subscriber: {}",
+                                    error_message);
+        co_return JobCompletionWaitResult::ERROR;
     }
 
-    if (queue_type == "none") {
-        size = 0;
-        co_return true;
-    }
+    auto timed_out = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<boost::asio::steady_timer> timer;
 
-    if (queue_type != "zset") {
-        size = 0;
-        co_return false;
-    }
-
-    std::vector<std::string> args{"ZCARD", EXECUTION_QUEUE_KEY};
-    if (!co_await command_executor_->execute_integer_command_async(args, size)) {
-        size = 0;
-        co_return false;
-    }
-
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_runtime_async(const WorkflowIdentity& workflow_id, const JobRuntimeData& job_data) {
-    const auto job_key = RedisKeys::job_key(workflow_id, job_data.job_id);
-    std::unordered_map<std::string, std::string> fields{
-        {"status", job_data.status},
-        {"remaining_dependencies", std::to_string(job_data.remaining_dependencies)},
-        {"priority", std::to_string(job_data.priority)},
-        {"timeout_sec", std::to_string(job_data.timeout_sec)},
-        {"max_retries", std::to_string(job_data.max_retries)},
-        {"current_retry_count", std::to_string(job_data.current_retry_count)},
-        {"retry_delay_sec", std::to_string(job_data.retry_delay_sec)},
-        {"retry_backoff_policy", job_data.retry_backoff_policy},
-        {"owned_by", ""},
-        {"start_run_time", ""}
-    };
-
-    if (!co_await command_executor_->execute_hset_command_async(job_key, fields)) {
-        co_return false;
-    }
-
-    bool retval = true;
-    if (job_data.successors.size() > 0) {
-        const auto successors = RedisKeys::successors_key(workflow_id, job_data.job_id);
-        retval = co_await command_executor_->execute_list_add_command_async(successors, job_data.successors);
-    }
-    co_return retval;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::update_job_runtime_async(
-    const WorkflowIdentity& workflow_id,
-    const std::string& job_id,
-    const std::unordered_map<std::string, std::string>& fields) {
-    if (fields.empty()) {
-        co_return true;
-    }
-
-    const auto job_key = RedisKeys::job_key(workflow_id, job_id);
-    co_return co_await command_executor_->execute_hset_command_async(job_key, fields);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
-                                                                         const std::string& job_id,
-                                                                         JobRuntimeData& job_data) const {
-    std::unordered_map<std::string, std::string> job_fields;
-    const auto job_key = RedisKeys::job_key(workflow_id, job_id);
-    if (!co_await command_executor_->execute_hgetall_command_async(job_key, job_fields)) {
-        Logger::get_logger()->error("fetch_job_runtime_async- Failed to fetched job {} fileds!!!", job_key);
-        co_return false;
-    }
-
-    job_data.job_id = job_id;
-    job_data.status = job_fields["status"];
-    job_data.remaining_dependencies = std::stoi(job_fields["remaining_dependencies"]);
-    job_data.priority = std::stoi(job_fields["priority"]);
-    job_data.timeout_sec = std::stoi(job_fields["timeout_sec"]);
-    job_data.max_retries = std::stoi(job_fields["max_retries"]);
-    job_data.current_retry_count = std::stoi(job_fields["current_retry_count"]);
-    job_data.retry_delay_sec = std::stoi(job_fields["retry_delay_sec"]);
-    job_data.retry_backoff_policy = job_fields["retry_backoff_policy"];
-    // job_data.owned_by = job_fields["owned_by"];
-
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(const WorkflowIdentity& workflow_id, 
-                                                                              const std::string& job_id, 
-                                                                              StartJobResult& result) {
-    const auto workflow_key = RedisKeys::workflow_key(workflow_id);
-    const auto job_key = RedisKeys::job_key(workflow_id, job_id);
-    const std::vector<std::string> keys{workflow_key, job_key};
-    const std::vector<std::string> args{
-        std::string(to_string(WorkflowStatus::READY)),
-        std::string(to_string(WorkflowStatus::RUNNING)),
-        std::string(to_string(WorkflowStatus::FAILED)),
-        std::string(to_string(WorkflowStatus::CANCELED)),
-        std::string(to_string(JobStatus::QUEUED)),
-        std::string(to_string(JobStatus::RUNNING)),
-        std::string(to_string(JobStatus::CANCELED))
-    };
-
-    const std::string lua_script = R"lua(
-        local workflow_key = KEYS[1]
-        local job_key = KEYS[2]
-
-        local workflow_ready = ARGV[1]
-        local workflow_running = ARGV[2]
-        local workflow_failed = ARGV[3]
-        local workflow_canceled = ARGV[4]
-        local job_queued = ARGV[5]
-        local job_running = ARGV[6]
-        local job_canceled = ARGV[7]
-
-        local job_status = redis.call('HGET', job_key, 'status')
-        if job_status == job_canceled then
-            return {'ALREADY_CANCELED'}
-        end
-
-        local now = redis.call('TIME')[1]
-        if job_status ~= job_queued then
-            -- Set workflow status to failed.
-            redis.call('HSET', workflow_key,
-                       'status', workflow_failed,
-                       'last_update_time', now)
-            return {'INVARIANT_VIOLATION_JOB_STATUS'}
-        end
-
-        local workflow_status = redis.call('HGET', workflow_key, 'status')
-        if workflow_status == workflow_ready then
-            local start_run_time = redis.call('HGET', workflow_key, 'start_run_time')
-            if start_run_time ~= false and start_run_time ~= '' then
-                redis.call('HSET', job_key, 'status', job_canceled)
-                redis.call('HSET', workflow_key,
-                           'status', workflow_failed,
-                           'last_update_time', now)
-                return {'INVARIANT_VIOLATION_WORKFLOW_TIME'}
-            end
-
-            redis.call('HSET', workflow_key,
-                       'status', workflow_running,
-                       'start_run_time', now,
-                       'last_update_time', now)
-            redis.call('HSET', job_key, 
-                       'status', job_running,
-                       'start_run_time', now)
-            return {'FIRST_TO_START'}
-        end
-
-        if workflow_status == workflow_running then
-            redis.call('HSET', job_key, 
-                       'status', job_running,
-                       'start_run_time', now)
-            return {'STARTED'}
-        end
-
-        if workflow_status == workflow_failed or
-           workflow_status == workflow_canceled then
-            redis.call('HSET', job_key, 'status', job_canceled)
-            return {'CANCELED_BY_WORKFLOW_STATE'}
-        end
-        -- In case workflow status is neither READY, RUNNING, FAILED or CANCELED,
-        -- it is an invariant violation and job status is set to canceled.
-        redis.call('HSET', job_key, 'status', job_canceled)
-        redis.call('HSET', workflow_key,
-                   'status', workflow_failed,
-                   'last_update_time', now)
-        return {'INVARIANT_VIOLATION_WORKFLOW_STATUS'}
-    )lua";
-
-    std::vector<std::string> values;
-    const auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, args, values);
-    if (!ok || values.size() != 1) {
-        result = StartJobResult::INTERNAL_ERROR;
-        co_return false;
-    }
-
-    if (values[0] == "FIRST_TO_START") {
-        result = StartJobResult::FIRST_TO_START;
-        co_return true;
-    }
-
-    if (values[0] == "STARTED") {
-        result = StartJobResult::STARTED;
-        co_return true;
-    }
-    
-    if (values[0] == "CANCELED_BY_WORKFLOW_STATE") {
-        result = StartJobResult::CANCELED_BY_WORKFLOW_STATE;
-    } else if (values[0] == "ALREADY_CANCELED") {
-        result = StartJobResult::ALREADY_CANCELED;
-    } else if (values[0] == "INVARIANT_VIOLATION_JOB_STATUS") {
-        result = StartJobResult::INVARIANT_VIOLATION_JOB_STATUS;
-    } else if (values[0] == "INVARIANT_VIOLATION_WORKFLOW_STATUS") {
-        result = StartJobResult::INVARIANT_VIOLATION_WORKFLOW_STATUS;
-    } else if (values[0] == "INVARIANT_VIOLATION_WORKFLOW_TIME") {
-        result = StartJobResult::INVARIANT_VIOLATION_WORKFLOW_TIME;
-    } else {
-        Logger::get_logger()->error("try_set_job_to_running_async - unexpected Lua result {}", values[0]);
-        result = StartJobResult::INTERNAL_ERROR;
-    }
-
-    co_return false;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_payload_async(
-    const WorkflowIdentity& workflow_id,
-    const std::string& job_id,
-    const std::vector<uint8_t>& payload) {
-    const auto payload_key = RedisKeys::payload_key(workflow_id, job_id);
-    const std::string payload_value(payload.begin(), payload.end());
-    co_return co_await command_executor_->execute_set_command_async(payload_key, payload_value, 0, false);
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_payload_async(
-    const WorkflowIdentity& workflow_id,
-    const std::string& job_id,
-    std::vector<uint8_t>& payload) const {
-    const auto payload_key = RedisKeys::payload_key(workflow_id, job_id);
-    std::vector<std::string> args{"GET", payload_key};
-    std::string bulk_string_payload;
-    auto ok = co_await command_executor_->execute_bulk_string_command_async(args, bulk_string_payload);
-    if (!ok) {
-        payload.clear();
-        co_return false;
-    }
-
-    payload.assign(bulk_string_payload.begin(), bulk_string_payload.end());
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::delete_workflow_runtime_async(const WorkflowIdentity& workflow_id) {
-    const auto workflow_key = RedisKeys::workflow_key(workflow_id);
-    std::vector<std::string> args{"DEL", workflow_key};
-    long long value = 0;
-    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-    co_return ok && value > 0;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::delete_all_workflow_jobs_async(const WorkflowIdentity& workflow_id, const WorkflowJobsList& jobs) {
-    for (const auto& job_data : jobs) {
-        const auto job_key = RedisKeys::job_key(workflow_id, job_data.job_id);
-        std::vector<std::string> args{"DEL", job_key};
-        long long value = 0;
-        auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-        if (!ok || value == 0) {
-            Logger::get_logger()->info("Failed to delete job runtime data for job_id: {} in workflow_id: {}", job_data.job_id, workflow_id.workflow_id);
+    try {
+        if (!co_await subscriber.subscribe_async(JOB_COMPLETION_READY_CHANNEL)) {
+            Logger::get_logger()->error("wait_for_job_completion_event_async - received invalid subscribe reply");
+            co_return JobCompletionWaitResult::ERROR;
         }
-        const auto successors_key = RedisKeys::successors_key(workflow_id, job_data.job_id);
-        args = {"DEL", successors_key};
-        value = 0;
-        ok = co_await command_executor_->execute_integer_command_async(args, value);
-        if (!ok || value == 0) {
-            Logger::get_logger()->info("Failed to delete job successors data for job_id: {} in workflow_id: {}", job_data.job_id, workflow_id.workflow_id);
+
+        ImplAsync stream_checker(ioc_);
+        if (!stream_checker.connect(host_, port_, error_message)) {
+            Logger::get_logger()->error("wait_for_job_completion_event_async - failed to connect stream checker: {}",
+                                        error_message);
+            co_return JobCompletionWaitResult::ERROR;
         }
-    }
-    co_return true;
-}
+        RedisCommandExecutor stream_check_executor(
+            [&stream_checker](const std::vector<std::string>& args) -> boost::asio::awaitable<RedisReply> {
+                co_return co_await stream_checker.execute_async(args);
+            });
 
-boost::asio::awaitable<bool> RedisDatabaseAsync::delete_job_payload_async(const WorkflowIdentity& workflow_id, const std::string& job_id) {
-    const auto payload_key = RedisKeys::payload_key(workflow_id, job_id);
-    std::vector<std::string> args{"DEL", payload_key};
-    long long value = 0;
-    auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-    if (!ok || value == 0) {
-        Logger::get_logger()->info("Failed to delete job payload data for job_id: {} in workflow_id: {}", job_id, workflow_id.workflow_id);
-    }
-
-    co_return true;
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::delete_all_jobs_payload_async(const WorkflowIdentity& workflow_id, const std::vector<std::string>& job_ids) {
-    for (const std::string& job_id : job_ids) {
-        const auto payload_key = RedisKeys::payload_key(workflow_id, job_id);
-        std::vector<std::string> args{"DEL", payload_key};
-        long long value = 0;
-        auto ok = co_await command_executor_->execute_integer_command_async(args, value);
-        if (!ok || value == 0) {
-            Logger::get_logger()->info("Failed to delete job payload data for job_id: {} in workflow_id: {}", job_id, workflow_id.workflow_id);
+        long long stream_size = 0;
+        std::vector<std::string> len_args{"XLEN", JOB_COMPLETION_STREAM_KEY};
+        if (!co_await stream_check_executor.execute_integer_command_async(len_args, stream_size)) {
+            Logger::get_logger()->error("wait_for_job_completion_event_async - failed to check completion stream length");
+            co_return JobCompletionWaitResult::ERROR;
         }
-    }
 
-    co_return true;
+        if (stream_size > 0) {
+            co_return JobCompletionWaitResult::EVENT;
+        }
+
+        timer = std::make_shared<boost::asio::steady_timer>(ioc_, timeout);
+        timer->async_wait([timed_out, &subscriber](const boost::system::error_code& ec) {
+            if (!ec) {
+                timed_out->store(true, std::memory_order_release);
+                subscriber.close();
+            }
+        });
+
+        co_await subscriber.wait_for_subscribed_pubsub_message_async(JOB_COMPLETION_READY_CHANNEL);
+        timer->cancel();
+        co_return JobCompletionWaitResult::EVENT;
+    } catch (const std::exception& ex) {
+        if (timer) {
+            timer->cancel();
+        }
+
+        if (timed_out->load(std::memory_order_acquire)) {
+            co_return JobCompletionWaitResult::TIMEOUT;
+        }
+
+        Logger::get_logger()->error("wait_for_job_completion_event_async - failed while waiting: {}",
+                                    ex.what());
+        co_return JobCompletionWaitResult::ERROR;
+    }
 }
 
 } // namespace flow_pilot

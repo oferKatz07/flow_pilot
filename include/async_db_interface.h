@@ -50,6 +50,11 @@ public:
         const std::string& client_id,
         std::vector<WorkflowData>& workflows) const = 0;
 
+    virtual boost::asio::awaitable<bool> get_all_jobs_for_workflow_async(
+        const std::string& client_id,
+        const std::string& workflow_id,
+        std::vector<WorkflowJob>& jobs) const = 0;
+
     virtual boost::asio::awaitable<bool> fail_workflow_async(
         const std::string& client_id,
         const std::string& workflow_id) = 0;

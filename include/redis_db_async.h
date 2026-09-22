@@ -7,6 +7,7 @@
 #include <mutex>
 #include <set>
 #include <unordered_map>
+#include <chrono>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/uuid/uuid.hpp>
@@ -14,6 +15,7 @@
 #include "redis_base.h"
 #include "redis_command_executor.h"
 #include "redis_keys.h"
+#include "database_models.h"
 #include "flow_pilot_error_msgs.h"
 
 namespace flow_pilot {
@@ -94,6 +96,20 @@ struct WorkflowRuntimeInfo
     PrioritizedJobsList jobs_queued_for_execution;
 };
 
+struct JobCompletionData {
+    std::string stream_id;
+    WorkflowIdentity identity;
+    std::string job_id;
+    JobStatus status = JobStatus::UNKNOWN;
+    StatusCodes error_code = StatusCodes::OK;
+};
+
+enum class JobCompletionWaitResult {
+    EVENT,
+    TIMEOUT,
+    ERROR
+};
+
 struct InMemoryDBConfig;
 
 class IRedisDatabaseAsync {
@@ -142,6 +158,9 @@ public:
     virtual boost::asio::awaitable<bool> create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
                                                                             const PrioritizedJobsList& ready_jobs) = 0;
     virtual boost::asio::awaitable<bool> delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) = 0;
+    virtual boost::asio::awaitable<bool> release_execution_slot_and_promote_ready_job_async(
+        const WorkflowIdentity& workflow_id,
+        std::string& promoted_job_id) = 0;
     virtual boost::asio::awaitable<bool> queue_workflow_jobs_for_execution_async(const WorkflowIdentity& workflow_id,
                                                                                  const PrioritizedJobsList& queued_jobs) = 0;
     virtual boost::asio::awaitable<bool> remove_jobs_from_execution_queue_async(const WorkflowIdentity& workflow_id,
@@ -165,6 +184,10 @@ public:
     virtual boost::asio::awaitable<bool> try_set_job_to_running_async(const WorkflowIdentity& workflow_id, 
                                                                       const std::string& job_id, 
                                                                       StartJobResult& result) = 0;
+    virtual boost::asio::awaitable<bool> enqueue_job_completion_async(const JobCompletionData& message) = 0;
+    virtual boost::asio::awaitable<bool> dequeue_job_completion_async(JobCompletionData& message) = 0;
+    virtual boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_completion_event_async(
+        std::chrono::milliseconds timeout) = 0;
     virtual boost::asio::awaitable<bool> set_job_payload_async(const WorkflowIdentity& workflow_id,
                                                                const std::string& job_id,
                                                                const std::vector<uint8_t>& payload) = 0;
@@ -224,6 +247,9 @@ public:
     boost::asio::awaitable<bool> create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
                                                                     const PrioritizedJobsList& ready_jobs) override;
     boost::asio::awaitable<bool> delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) override;
+    boost::asio::awaitable<bool> release_execution_slot_and_promote_ready_job_async(
+        const WorkflowIdentity& workflow_id,
+        std::string& promoted_job_id) override;
     boost::asio::awaitable<bool> queue_workflow_jobs_for_execution_async(const WorkflowIdentity& workflow_id, 
                                                                          const PrioritizedJobsList& queued_jobs) override;
     boost::asio::awaitable<bool> remove_jobs_from_execution_queue_async(const WorkflowIdentity& workflow_id,
@@ -246,6 +272,10 @@ public:
     boost::asio::awaitable<bool> try_set_job_to_running_async(const WorkflowIdentity& workflow_id, 
                                                               const std::string& job_id, 
                                                               StartJobResult& result) override;
+    boost::asio::awaitable<bool> enqueue_job_completion_async(const JobCompletionData& message) override;
+    boost::asio::awaitable<bool> dequeue_job_completion_async(JobCompletionData& message) override;
+    boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_completion_event_async(
+        std::chrono::milliseconds timeout) override;
     boost::asio::awaitable<bool> set_job_payload_async(const WorkflowIdentity& workflow_id,
                                                        const std::string& job_id, 
                                                        const std::vector<uint8_t>& payload) override;

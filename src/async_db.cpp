@@ -107,6 +107,16 @@ boost::asio::awaitable<bool> AsyncDatabase::get_all_workflows_for_client_async(
     co_return db_.get_all_workflows_for_client(client_id, workflows);
 }
 
+boost::asio::awaitable<bool> AsyncDatabase::get_all_jobs_for_workflow_async(
+    const std::string& client_id,
+    const std::string& workflow_id,
+    std::vector<WorkflowJob>& jobs) const
+{
+    auto executor = pool_.get_executor();
+    co_await boost::asio::post(executor, boost::asio::use_awaitable);
+    co_return db_.get_all_jobs_for_workflow(client_id, workflow_id, jobs);
+}
+
 boost::asio::awaitable<bool> AsyncDatabase::fail_workflow_async(
         const std::string& client_id,
         const std::string& workflow_id) {

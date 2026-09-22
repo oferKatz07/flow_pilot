@@ -1,0 +1,435 @@
+// completion_handler.cpp
+
+
+#include "logger.h"
+#include "db_factory.h"
+#include "redis_db_async.h"
+#include "completion_handler.h"
+
+#include <algorithm>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/use_future.hpp>
+#include <chrono>
+#include <ctime>
+#include <future>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+namespace flow_pilot {
+
+namespace {
+
+constexpr auto JOB_COMPLETION_WAIT_TIMEOUT = std::chrono::seconds(1);
+
+int parse_int_field(const std::unordered_map<std::string, std::string>& fields,
+                    const std::string& field_name,
+                    int default_value = 0)
+{
+    const auto it = fields.find(field_name);
+    if (it == fields.end()) {
+        return default_value;
+    }
+
+    try {
+        return std::stoi(it->second);
+    } catch (...) {
+        return default_value;
+    }
+}
+
+std::string now_as_string()
+{
+    return std::to_string(std::time(nullptr));
+}
+
+bool is_waiting_to_run(JobStatus status)
+{
+    return status == JobStatus::PENDING ||
+           status == JobStatus::READY ||
+           status == JobStatus::QUEUED;
+}
+
+} // namespace
+
+CompletionHandler::CompletionHandler(bool auto_start)
+{
+    if (auto_start) {
+        start();
+    } else {
+        running_.store(true, std::memory_order_release);
+    }
+}
+
+CompletionHandler::~CompletionHandler()
+{
+    stop();
+
+    if (completion_handler_thread_.joinable()) {
+        completion_handler_thread_.join();
+    }
+}
+
+void CompletionHandler::start()
+{
+    running_.store(true, std::memory_order_release);
+
+    completion_handler_thread_ = std::thread([this]() {
+        auto redis_db = RedisDatabaseAsync::get_instance();
+        auto& ioc = redis_db->io_context();
+        auto work_guard = boost::asio::make_work_guard(ioc);
+        auto main_loop_future = boost::asio::co_spawn(
+            ioc,
+            completion_handler_main_loop(),
+            boost::asio::use_future);
+
+        while (main_loop_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+            ioc.run_for(std::chrono::milliseconds(50));
+        }
+
+        main_loop_future.get();
+    });
+}
+
+boost::asio::awaitable<void> CompletionHandler::completion_handler_main_loop() {
+    while (running_.load(std::memory_order_acquire)) {
+        // Wait for a job completion event from Redis
+        JobCompletionData completion_data;
+        if (!co_await get_completed_jobs(completion_data)) {
+            if (!running_.load(std::memory_order_acquire)) {
+                break; // Exit the loop if the handler is no longer running
+            }
+            Logger::get_logger()->error("Failed to get completed jobs");
+            continue;
+        }
+        // Process the completed job
+        Logger::get_logger()->info("Processing completed job: client_id={}, workflow_id={}, job_id={}, status={}, error_code={}",
+                                   completion_data.identity.client_id,
+                                   completion_data.identity.workflow_id,
+                                   completion_data.job_id,
+                                   static_cast<int>(completion_data.status),
+                                   static_cast<int>(completion_data.error_code));
+        if (!co_await process_completed_jobs(completion_data)) {
+            Logger::get_logger()->error("Failed to process completed job: client_id={}, workflow_id={}, job_id={}",
+                                       completion_data.identity.client_id,
+                                       completion_data.identity.workflow_id,
+                                       completion_data.job_id);
+        }
+    }
+
+    Logger::get_logger()->info("Completion handler main loop has exited.");
+}
+
+boost::asio::awaitable<bool> CompletionHandler::get_completed_jobs(JobCompletionData& completion_data)
+{
+    auto redis_db = RedisDatabaseAsync::get_instance();
+
+    while (running_.load(std::memory_order_acquire)) {
+        const auto wait_result = co_await redis_db->wait_for_job_completion_event_async(JOB_COMPLETION_WAIT_TIMEOUT);
+
+        if (wait_result == JobCompletionWaitResult::TIMEOUT) {
+            continue;
+        }
+
+        if (wait_result == JobCompletionWaitResult::ERROR) {
+            Logger::get_logger()->error("Failed while waiting for job completion event");
+            co_return false;
+        }
+
+        if (!co_await redis_db->dequeue_job_completion_async(completion_data)) {
+            Logger::get_logger()->error("Failed to dequeue job completion message");
+            co_return false;
+        }
+
+        if (!completion_data.stream_id.empty()) {
+            co_return true;
+        }
+    }
+
+    co_return false;
+}
+
+boost::asio::awaitable<bool> CompletionHandler::process_completed_jobs(JobCompletionData& completion_data)
+{
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    const auto& identity = completion_data.identity;
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    if (!co_await redis_db->fetch_workflow_runtime_async(identity, workflow_fields) ||
+        workflow_fields.empty()) {
+        Logger::get_logger()->error("process_completed_jobs - failed to fetch workflow runtime: client_id={}, workflow_id={}",
+                                    identity.client_id,
+                                    identity.workflow_id);
+        co_return false;
+    }
+
+    if (completion_data.status == JobStatus::COMPLETED) {
+        const bool handled = co_await handle_job_completed(completion_data, workflow_fields);
+        co_return handled;
+    }
+
+    if (completion_data.status == JobStatus::FAILED) {
+        JobRuntimeData job_runtime;
+        if (!co_await redis_db->fetch_job_runtime_async(identity, completion_data.job_id, job_runtime)) {
+            Logger::get_logger()->error("process_completed_jobs - failed to fetch job runtime: client_id={}, workflow_id={}, job_id={}",
+                                        identity.client_id,
+                                        identity.workflow_id,
+                                        completion_data.job_id);
+            co_return false;
+        }
+
+        const bool handled = co_await handle_job_failed(completion_data, job_runtime, workflow_fields);
+        co_return handled;
+    }
+
+    if (completion_data.status == JobStatus::CANCELED) {
+        const bool handled = co_await handle_job_canceled(completion_data, workflow_fields);
+        co_return handled;
+    }
+
+    Logger::get_logger()->error("process_completed_jobs - unsupported completion status: client_id={}, workflow_id={}, job_id={}, status={}",
+                                identity.client_id,
+                                identity.workflow_id,
+                                completion_data.job_id,
+                                static_cast<int>(completion_data.status));
+    co_return false;
+}
+
+boost::asio::awaitable<bool> CompletionHandler::handle_job_completed(
+    const JobCompletionData& completion_data,
+    const std::unordered_map<std::string, std::string>& workflow_fields)
+{
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    auto& sqlite_db = DBFactory::get();
+    const auto& identity = completion_data.identity;
+    const std::string now = now_as_string();
+    const int updated_completed_jobs = parse_int_field(workflow_fields, "completed_jobs") + 1;
+    const int total_jobs = parse_int_field(workflow_fields, "total_jobs");
+    const auto workflow_status_it = workflow_fields.find("status");
+    const std::string workflow_status = workflow_status_it == workflow_fields.end()
+        ? std::string()
+        : workflow_status_it->second;
+
+    std::unordered_map<std::string, std::string> job_updates{
+        {"status", std::string(to_string(JobStatus::COMPLETED))},
+        {"last_update_time", now}
+    };
+    if (!co_await redis_db->update_job_runtime_async(identity, completion_data.job_id, job_updates)) {
+        co_return false;
+    }
+
+    const bool workflow_completed = workflow_status == to_string(WorkflowStatus::RUNNING) &&
+                                    total_jobs > 0 &&
+                                    updated_completed_jobs == total_jobs;
+    std::unordered_map<std::string, std::string> workflow_updates{
+        {"completed_jobs", std::to_string(updated_completed_jobs)},
+        {"last_update_time", now}
+    };
+    if (workflow_completed) {
+        workflow_updates["status"] = std::string(to_string(WorkflowStatus::COMPLETED));
+    }
+
+    if (!co_await redis_db->update_workflow_runtime_async(identity, workflow_updates)) {
+        co_return false;
+    }
+
+    std::string promoted_job_id;
+    if (!co_await redis_db->release_execution_slot_and_promote_ready_job_async(identity, promoted_job_id)) {
+        co_return false;
+    }
+
+    if (!co_await sqlite_db.update_job_status_async(
+            identity.client_id,
+            identity.workflow_id,
+            completion_data.job_id,
+            JobStatus::COMPLETED)) {
+        co_return false;
+    }
+
+    if (workflow_completed &&
+        !co_await sqlite_db.update_workflow_status_async(
+            identity.client_id,
+            identity.workflow_id,
+            WorkflowStatus::COMPLETED)) {
+        co_return false;
+    }
+
+    if (!promoted_job_id.empty()) {
+        std::vector<std::string> queued_jobs{promoted_job_id};
+        std::vector<std::string> ready_jobs;
+        if (!co_await sqlite_db.update_ready_jobs_async(
+                identity.client_id,
+                identity.workflow_id,
+                queued_jobs,
+                ready_jobs)) {
+            co_return false;
+        }
+    }
+
+    co_return true;
+}
+
+boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
+    const JobCompletionData& completion_data,
+    const JobRuntimeData& job_runtime,
+    const std::unordered_map<std::string, std::string>& workflow_fields)
+{
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    auto& sqlite_db = DBFactory::get();
+    const auto& identity = completion_data.identity;
+    const std::string now = now_as_string();
+    const int updated_retry_count = job_runtime.current_retry_count + 1;
+
+    if (updated_retry_count < job_runtime.max_retries) {
+        const bool retried = co_await handle_job_retry(
+            completion_data,
+            updated_retry_count,
+            job_runtime.max_retries);
+        co_return retried;
+    }
+
+    std::unordered_map<std::string, std::string> failed_job_updates{
+        {"status", std::string(to_string(JobStatus::FAILED))},
+        {"current_retry_count", std::to_string(updated_retry_count)},
+        {"last_update_time", now}
+    };
+    if (!co_await redis_db->update_job_runtime_async(
+            identity,
+            completion_data.job_id,
+            failed_job_updates)) {
+        co_return false;
+    }
+
+    std::vector<WorkflowJob> workflow_jobs;
+    if (!co_await sqlite_db.get_all_jobs_for_workflow_async(
+            identity.client_id,
+            identity.workflow_id,
+            workflow_jobs)) {
+        co_return false;
+    }
+
+    PrioritizedJobsList queued_jobs_to_remove;
+    for (const auto& job : workflow_jobs) {
+        if (job.job_id == completion_data.job_id || !is_waiting_to_run(job.status)) {
+            continue;
+        }
+
+        std::unordered_map<std::string, std::string> canceled_job_updates{
+            {"status", std::string(to_string(JobStatus::CANCELED))},
+            {"last_update_time", now}
+        };
+        if (!co_await redis_db->update_job_runtime_async(
+                identity,
+                job.job_id,
+                canceled_job_updates)) {
+            co_return false;
+        }
+
+        if (job.status == JobStatus::QUEUED) {
+            queued_jobs_to_remove.push_back(PrioritizedJob{job.job_id, {}, 0});
+        }
+    }
+
+    if (!queued_jobs_to_remove.empty() &&
+        !co_await redis_db->remove_jobs_from_execution_queue_async(identity, queued_jobs_to_remove)) {
+        co_return false;
+    }
+
+    if (!co_await redis_db->delete_workflow_waiting_ready_jobs(identity)) {
+        co_return false;
+    }
+
+    const int reserved_slots = parse_int_field(workflow_fields, "reserved_execution_slots");
+    const int failed_jobs = parse_int_field(workflow_fields, "failed_jobs");
+    std::unordered_map<std::string, std::string> failed_workflow_updates{
+        {"status", std::string(to_string(WorkflowStatus::FAILED))},
+        {"failed_jobs", std::to_string(failed_jobs + 1)},
+        {"reserved_execution_slots", std::to_string(std::max(0, reserved_slots - 1))},
+        {"last_update_time", now}
+    };
+    if (!co_await redis_db->update_workflow_runtime_async(
+            identity,
+            failed_workflow_updates)) {
+        co_return false;
+    }
+
+    if (!co_await sqlite_db.update_job_status_async(
+            identity.client_id,
+            identity.workflow_id,
+            completion_data.job_id,
+            JobStatus::FAILED)) {
+        co_return false;
+    }
+
+    const bool sqlite_failed = co_await sqlite_db.fail_workflow_async(identity.client_id, identity.workflow_id);
+    co_return sqlite_failed;
+}
+
+boost::asio::awaitable<bool> CompletionHandler::handle_job_retry(
+    const JobCompletionData& completion_data,
+    int updated_retry_count,
+    int max_retries)
+{
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    const auto& identity = completion_data.identity;
+    std::unordered_map<std::string, std::string> retry_updates{
+        {"current_retry_count", std::to_string(updated_retry_count)},
+        {"last_update_time", now_as_string()}
+    };
+    if (!co_await redis_db->update_job_runtime_async(
+            identity,
+            completion_data.job_id,
+            retry_updates)) {
+        co_return false;
+    }
+
+    Logger::get_logger()->info("process_completed_jobs - job failed but retry limit not reached: client_id={}, workflow_id={}, job_id={}, retry_count={}, max_retries={}",
+                               identity.client_id,
+                               identity.workflow_id,
+                               completion_data.job_id,
+                               updated_retry_count,
+                               max_retries);
+    co_return true;
+}
+
+boost::asio::awaitable<bool> CompletionHandler::handle_job_canceled(
+    const JobCompletionData& completion_data,
+    const std::unordered_map<std::string, std::string>& workflow_fields)
+{
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    auto& sqlite_db = DBFactory::get();
+    const auto& identity = completion_data.identity;
+    const std::string now = now_as_string();
+    const int reserved_slots = parse_int_field(workflow_fields, "reserved_execution_slots");
+
+    std::unordered_map<std::string, std::string> canceled_job_updates{
+        {"status", std::string(to_string(JobStatus::CANCELED))},
+        {"last_update_time", now}
+    };
+    if (!co_await redis_db->update_job_runtime_async(
+            identity,
+            completion_data.job_id,
+            canceled_job_updates)) {
+        co_return false;
+    }
+
+    std::unordered_map<std::string, std::string> canceled_workflow_updates{
+        {"reserved_execution_slots", std::to_string(std::max(0, reserved_slots - 1))},
+        {"last_update_time", now}
+    };
+    if (!co_await redis_db->update_workflow_runtime_async(
+            identity,
+            canceled_workflow_updates)) {
+        co_return false;
+    }
+
+    const bool sqlite_canceled = co_await sqlite_db.update_job_status_async(
+        identity.client_id,
+        identity.workflow_id,
+        completion_data.job_id,
+        JobStatus::CANCELED);
+    co_return sqlite_canceled;
+}
+
+} // namespace flow_pilot
