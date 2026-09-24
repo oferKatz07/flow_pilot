@@ -7,6 +7,7 @@
 #include <future>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -312,3 +313,21 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndC
 }
 
 } // namespace
+
+TEST_F(CompletionHandlerTest, RequestStopIsIdempotent)
+{
+    auto work_guard = boost::asio::make_work_guard(ioc_);
+    ioc_.restart();
+    std::thread io_thread([this]() {
+        ioc_.run();
+    });
+
+    {
+        CompletionHandler handler;
+        handler.request_stop();
+        handler.request_stop();
+    }
+
+    work_guard.reset();
+    io_thread.join();
+}

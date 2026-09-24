@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <string>
 
 namespace flow_pilot {
@@ -65,6 +66,13 @@ struct ClientDataConfig {
     ConfigManagerTypes config_type = ConfigManagerTypes::SQLITE_MANAGER;
 };
 
+// Threading default configuration
+struct ThreadConfig {
+    std::size_t redis_io_threads = 1;
+    std::size_t scheduler_count = 1;
+    std::size_t completion_handler_count = 1;
+};
+
 // Workflow default configuration
 struct WorkflowConfig {
     std::string version = "v1.0";
@@ -95,6 +103,9 @@ public:
     WorkflowConfig& workflow() { return workflow_config_; }
     const WorkflowConfig& workflow() const { return workflow_config_; }
 
+    ThreadConfig& threads() { return thread_config_; }
+    const ThreadConfig& threads() const { return thread_config_; }
+
     // Logger config
     LoggerConfig& logger() { return logger_config_; }
     const LoggerConfig& logger() const { return logger_config_; }
@@ -111,6 +122,7 @@ private:
     DBConfig db_config_;
     ClientDataConfig client_config_;
     WorkflowConfig workflow_config_;
+    ThreadConfig thread_config_;
 };
 
 } // namespace flow_pilot

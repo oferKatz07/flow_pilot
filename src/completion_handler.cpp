@@ -8,11 +8,9 @@
 
 #include <algorithm>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/executor_work_guard.hpp>
-#include <boost/asio/use_future.hpp>
+#include <boost/asio/detached.hpp>
 #include <chrono>
 #include <ctime>
-#include <future>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -64,31 +62,58 @@ CompletionHandler::CompletionHandler(bool auto_start)
 
 CompletionHandler::~CompletionHandler()
 {
-    stop();
-
-    if (completion_handler_thread_.joinable()) {
-        completion_handler_thread_.join();
-    }
+    request_stop();
+    wait_for_main_loop_finished();
 }
 
 void CompletionHandler::start()
 {
     running_.store(true, std::memory_order_release);
+    main_loop_started_.store(true, std::memory_order_release);
 
-    completion_handler_thread_ = std::thread([this]() {
-        auto redis_db = RedisDatabaseAsync::get_instance();
-        auto& ioc = redis_db->io_context();
-        auto work_guard = boost::asio::make_work_guard(ioc);
-        auto main_loop_future = boost::asio::co_spawn(
-            ioc,
-            completion_handler_main_loop(),
-            boost::asio::use_future);
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    boost::asio::co_spawn(
+        redis_db->io_context(),
+        [this]() -> boost::asio::awaitable<void> {
+            try {
+                co_await completion_handler_main_loop();
+            } catch (const std::exception& e) {
+                Logger::get_logger()->error("Completion handler main loop failed: {}", e.what());
+            } catch (...) {
+                Logger::get_logger()->error("Completion handler main loop failed with an unknown exception");
+            }
+            mark_main_loop_finished();
+            co_return;
+        },
+        boost::asio::detached);
+}
 
-        while (main_loop_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-            ioc.run_for(std::chrono::milliseconds(50));
-        }
+void CompletionHandler::request_stop()
+{
+    bool was_running = true;
+    if (!running_.compare_exchange_strong(was_running, false, std::memory_order_acq_rel)) {
+        return;
+    }
+}
 
-        main_loop_future.get();
+void CompletionHandler::mark_main_loop_finished()
+{
+    {
+        std::lock_guard<std::mutex> lock(main_loop_finished_mutex_);
+        main_loop_finished_ = true;
+    }
+    main_loop_finished_cv_.notify_all();
+}
+
+void CompletionHandler::wait_for_main_loop_finished()
+{
+    if (!main_loop_started_.load(std::memory_order_acquire)) {
+        return;
+    }
+
+    std::unique_lock<std::mutex> lock(main_loop_finished_mutex_);
+    main_loop_finished_cv_.wait(lock, [this]() {
+        return main_loop_finished_;
     });
 }
 

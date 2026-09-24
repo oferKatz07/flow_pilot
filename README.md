@@ -6,7 +6,7 @@ FlowPilot is a modern backend infrastructure project that explores production-gr
 
 The project focuses on the engineering challenges behind reliable distributed systems rather than workflow business logic. Its architecture emphasizes idempotent request admission, dependency-aware scheduling, durable request auditing and workflow persistence, and scalable asynchronous execution.
 
-The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY → QUEUED → RUNNING job transitions, scheduler ownership, worker dispatch, completion handling, and recovery.
+The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY -> QUEUED -> RUNNING job transitions, runtime-owned scheduler and completion-handler components, worker dispatch, completion handling, clean shutdown, and recovery.
 
 FlowPilot is being developed as a portfolio-quality system architecture project demonstrating modern C++ backend design, concurrent programming, and infrastructure engineering.
 
@@ -120,6 +120,7 @@ This enables:
 • Validate workflows before they enter the execution engine.
 • Prefer explicit workflow state over implicit behavior.
 • Build around asynchronous I/O and coroutine-based composition.
+• Keep runtime lifecycle ownership explicit so schedulers, completion handlers, and Redis I/O threads can be started, stopped, and eventually scaled independently.
 
 
 # Key Design Decisions
@@ -171,6 +172,48 @@ PENDING -> READY -> QUEUED -> RUNNING -> COMPLETED | FAILED | CANCELED
 
 Redis is the runtime authority for these transitions during execution, while SQLite persists durable status and timestamp history.
 
+## Runtime Ownership and Thread Configuration
+
+FlowPilot now owns runtime execution components through a `FlowPilotRuntime` manager. The runtime creates and shuts down Redis I/O threads, workflow schedulers, and completion handlers as one coordinated lifecycle while still allowing schedulers and completion handlers to be added or removed at runtime.
+
+The default thread configuration is intentionally conservative:
+
+* Redis I/O threads: `1`
+* Workflow schedulers: `1`
+* Completion handlers: `1`
+
+The executable accepts these overrides:
+
+```bash
+./flow_pilot --redis-io-threads 2 --schedulers 2 --completion-handlers 2
+```
+
+Each scheduler and completion handler can be stopped independently. Shutdown is idempotent, so `request_stop()` may be called by explicit runtime management code and again during destruction without double-stopping the same component.
+
+## Runtime Status API
+
+FlowPilot exposes an initial runtime status endpoint:
+
+```text
+GET /api/v1/runtime/status
+```
+
+Example response:
+
+```json
+{
+  "status": "running",
+  "started": true,
+  "shutting_down": false,
+  "redis_io_threads": 1,
+  "scheduler_count": 1,
+  "completion_handler_count": 1
+}
+```
+
+This API currently reports lifecycle state and component counts. It is intended to grow into the operational status surface for runtime component UUIDs, per-thread statistics, scheduler health, and completion-handler metrics.
+
+
 ## Explicit Compensation
 
 Rollback semantics are implemented using explicit compensation jobs rather than distributed transactions.
@@ -207,7 +250,7 @@ These policies are loaded during initialization and applied during workflow admi
 * Grafana dashboards
 * Go-based workers
 * Distributed scheduler coordination
-* Health monitoring and recovery for schedulers and worker threads
+* Runtime status, health monitoring, and recovery for schedulers and worker threads
 
 ---
 
@@ -236,7 +279,7 @@ These policies are loaded during initialization and applied during workflow admi
 
 The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, DAG dependency validation, SQLite persistence, Redis runtime initialization, and initial execution-queue population.
 
-The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED → RUNNING transitions, and durable SQLite timestamps for READY/QUEUED/RUNNING lifecycle events. The next major implementation step is completion handling, followed by dependency advancement, retry handling, and workflow finalization.
+The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED -> RUNNING transitions, completion-handler processing, runtime-managed scheduler/completion-handler lifecycles, configurable Redis I/O/scheduler/completion-handler thread counts, clean shutdown tests, a runtime status API, and durable SQLite timestamps for READY/QUEUED/RUNNING lifecycle events. The next major implementation steps are deeper dependency advancement, retry handling, workflow finalization, and richer operational status/health data.
 
 
 ### Current Project Status
@@ -259,6 +302,12 @@ The workflow execution subsystem is in progress. The current code supports Redis
 
 ✔ Audit history
 
+✔ Runtime manager for Redis I/O threads, schedulers, and completion handlers
+
+✔ Runtime status API
+
+✔ Clean shutdown process tests
+
 ✔ Redis runtime initialization
 
 ✔ Initial READY/QUEUED job preparation
@@ -269,15 +318,15 @@ The workflow execution subsystem is in progress. The current code supports Redis
 
 ✔ Local worker dispatch foundation
 
+✔ Completion-handler runtime loop foundation
+
 ✔ READY/QUEUED/RUNNING lifecycle tests
 
-🚧 Scheduler
+🚧 Scheduler recovery and health monitoring
 
-🚧 Worker execution
+🚧 Worker execution backend integration
 
-🚧 Completion handler
-
-🚧 Dependency advancement after completion
+🚧 Full dependency advancement after completion
 
 🚧 Scheduler-local health monitor and recovery
 
@@ -306,8 +355,11 @@ The workflow execution subsystem is in progress. The current code supports Redis
 - Priority-based Redis execution queue
 - Scheduler ownership for claimed jobs
 - Bounded local scheduler queue
-- Worker dispatch and QUEUED → RUNNING transition
-- Completion handler
+- Worker dispatch and QUEUED -> RUNNING transition
+- Runtime-managed scheduler and completion-handler lifecycles
+- Configurable Redis I/O, scheduler, and completion-handler counts
+- Runtime status API
+- Completion handling foundation
 - Dependency advancement
 - Retry handling
 - Scheduler-local health monitoring and recovery

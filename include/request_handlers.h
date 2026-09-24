@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
 #include <string_view>
 #include <boost/beast/http.hpp>
@@ -15,6 +16,7 @@ namespace http = beast::http;
 
 struct HandlerCtxData {
     std::string_view workflow_id;
+    std::string client_id;
     std::string request_body;
     http::status error_status_;
     bool keep_alive;
@@ -65,6 +67,12 @@ public:
     boost::asio::awaitable<http::response<http::string_body>> handle(const HandlerCtxData& ctx) override;
 };
 
+class RuntimeStatusHandler final : public BaseHandler {
+public:
+    RuntimeStatusHandler() = default;
+    boost::asio::awaitable<http::response<http::string_body>> handle(const HandlerCtxData& ctx) override;
+};
+
 class ErrorHandler final : public BaseHandler {
 public:
     ErrorHandler() = default;
@@ -80,11 +88,12 @@ public:
 
 private:
     HandlerFactory() = default;
-    WorkflowValidationHandler workflow_validation_handler_;
+    std::unique_ptr<WorkflowValidationHandler> workflow_validation_handler_;
     GetWorkflowListHandler get_workflow_list_handler_;
     GetWorkflowHandler get_workflow_handler_;
     DeleteWorkflowHandler delete_workflow_handler_;
     CancelWorkflowHandler cancel_workflow_handler_;
+    RuntimeStatusHandler runtime_status_handler_;
     ErrorHandler error_handler_;
 };
 

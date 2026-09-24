@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
+
 #include <atomic>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -41,8 +44,8 @@ public:
     }
 
 protected:
-    bool update_job_status_to_running_sync(const JobExeData&) override {
-        return start_transition_succeeds_;
+    boost::asio::awaitable<bool> update_job_status_to_running(const JobExeData&) override {
+        co_return start_transition_succeeds_;
     }
 
     bool execute_job(const JobExeData& job_exe_data) override {
@@ -62,6 +65,13 @@ private:
     bool start_transition_succeeds_;
 };
 
+void run_worker_loop(WorkerThread& worker) {
+    boost::asio::io_context ioc;
+    auto future = boost::asio::co_spawn(ioc, worker.main_worker_loop(), boost::asio::use_future);
+    ioc.run();
+    future.get();
+}
+
 } // namespace
 
 TEST(WorkerThreadTest, MainLoopFetchesAndExecutesUntilFetcherStops)
@@ -73,10 +83,7 @@ TEST(WorkerThreadTest, MainLoopFetchesAndExecutesUntilFetcherStops)
     FixedJobFetcher fetcher(std::move(jobs));
     CountingWorkerThread worker(fetcher);
 
-    std::thread worker_thread([&worker]() {
-        worker.main_worker_loop();
-    });
-    worker_thread.join();
+    run_worker_loop(worker);
 
     EXPECT_EQ(worker.executed_jobs(), 2);
 }
@@ -89,10 +96,7 @@ TEST(WorkerThreadTest, MainLoopDoesNotExecuteJobsWhenStartTransitionFails)
     FixedJobFetcher fetcher(std::move(jobs));
     CountingWorkerThread worker(fetcher, false);
 
-    std::thread worker_thread([&worker]() {
-        worker.main_worker_loop();
-    });
-    worker_thread.join();
+    run_worker_loop(worker);
 
     EXPECT_EQ(worker.executed_jobs(), 0);
 }

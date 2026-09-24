@@ -1,11 +1,30 @@
 // redis_command_executor.cpp - Generic Redis command helpers for FlowPilot
 
+#include <boost/asio/error.hpp>
+#include <boost/system/system_error.hpp>
+#include <string_view>
 #include <utility>
 
 #include "logger.h"
 #include "redis_command_executor.h"
 
 namespace flow_pilot {
+
+namespace {
+
+bool is_expected_shutdown_cancellation(const boost::system::system_error& ex)
+{
+    return ex.code() == boost::asio::error::operation_aborted ||
+           ex.code() == boost::asio::error::bad_descriptor;
+}
+
+bool is_expected_shutdown_cancellation(std::string_view message)
+{
+    return message.find("Operation canceled") != std::string_view::npos ||
+           message.find("Bad file descriptor") != std::string_view::npos;
+}
+
+} // namespace
 
 RedisCommandExecutor::RedisCommandExecutor(ExecuteFunction execute)
     : execute_(std::move(execute))
@@ -386,9 +405,16 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_blocking_dequeue
             member.clear();
             co_return true;
         }
+    } catch (const boost::system::system_error& ex) {
+        if (!is_expected_shutdown_cancellation(ex)) {
+            Logger::get_logger()->error("execute_zset_blocking_dequeue_command_async - Redis BZPOPMAX command failed: {}",
+                                        ex.what());
+        }
     } catch (const std::exception& ex) {
-        Logger::get_logger()->error("execute_zset_blocking_dequeue_command_async - Redis BZPOPMAX command failed: {}",
-                                    ex.what());
+        if (!is_expected_shutdown_cancellation(ex.what())) {
+            Logger::get_logger()->error("execute_zset_blocking_dequeue_command_async - Redis BZPOPMAX command failed: {}",
+                                        ex.what());
+        }
     }
     member.clear();
     co_return false;

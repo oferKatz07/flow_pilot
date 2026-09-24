@@ -80,6 +80,11 @@ public:
     }
 };
 
+static awaitable<void> run_session(std::shared_ptr<session> session_ptr)
+{
+    co_await session_ptr->run();
+}
+
 class listener : public std::enable_shared_from_this<listener> {
     asio::io_context& ioc_;
     tcp::acceptor acceptor_;
@@ -122,8 +127,9 @@ public:
             try {
                 tcp::socket socket = co_await acceptor_.async_accept(use_awaitable);
                 Logger::get_logger()->debug("New client connected from {}", socket.remote_endpoint().address().to_string());
-                co_spawn(acceptor_.get_executor(), 
-                         session(std::move(socket)).run(),
+                auto session_ptr = std::make_shared<session>(std::move(socket));
+                co_spawn(acceptor_.get_executor(),
+                         run_session(std::move(session_ptr)),
                          detached);
             }
             catch (const boost::system::system_error& ex) {
@@ -134,6 +140,11 @@ public:
     }
 };
 
+static awaitable<void> run_listener(std::shared_ptr<listener> listener_ptr)
+{
+    co_await listener_ptr->run();
+}
+
 void run_http_server(asio::io_context& ioc)
 {
     Logger::get_logger()->info("Initializing FlowPilot HTTP server");
@@ -141,8 +152,8 @@ void run_http_server(asio::io_context& ioc)
     auto const address = asio::ip::make_address(config.address);
     tcp::endpoint endpoint{address, config.port};
     auto listener_ptr = std::make_shared<listener>(ioc, endpoint);
-    co_spawn(ioc, 
-             listener_ptr->run(),
+    co_spawn(ioc,
+             run_listener(std::move(listener_ptr)),
              detached);
     Logger::get_logger()->info("HTTP server listening on {}:{}", config.address, config.port);
 }

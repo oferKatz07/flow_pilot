@@ -35,15 +35,13 @@ public:
     explicit WorkerThread(IJobFetcher& job_fetcher);
     virtual ~WorkerThread() = default;
     // The worker thread main loop that executes jobs
-    void main_worker_loop();
+    boost::asio::awaitable<void> main_worker_loop();
+    void run_worker_loop();
 
 protected:
-    virtual bool update_job_status_to_running_sync(const JobExeData& job_exe_data);
+    virtual boost::asio::awaitable<bool> update_job_status_to_running(const JobExeData& job_exe_data);
     virtual bool execute_job(const JobExeData& job_exe_data);
     virtual void update_completion_handler(const JobCompletionData& completion_data);
-
-private:
-    boost::asio::awaitable<bool> update_job_status_to_running(const JobExeData& job_exe_data);
 
 private:
     IJobFetcher& job_fetcher_;

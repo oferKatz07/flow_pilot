@@ -1173,3 +1173,75 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningHandlesQueuedJobWorkfl
         ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
     }
 }
+
+TEST_F(RedisDatabaseAsyncValidatorTest, SchedulerCanBeRemovedWhileAnotherSchedulerContinuesRunning)
+{
+    run_async(ioc_, redis_->clear_execution_queue_async());
+
+    auto work_guard = boost::asio::make_work_guard(ioc_);
+    ioc_.restart();
+    std::thread io_thread([this]() {
+        ioc_.run();
+    });
+
+    auto removed_scheduler = std::make_unique<scheduler>(1, 1);
+    auto active_scheduler = std::make_unique<scheduler>(1, 1);
+
+    removed_scheduler->request_stop();
+    removed_scheduler->request_stop();
+    removed_scheduler.reset();
+
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string job_id = "job-" + generate_unique_id();
+    JobRuntimeData job_data = make_job_runtime(job_id, JobStatus::QUEUED, 0, 25);
+
+    auto set_runtime_future = boost::asio::co_spawn(
+        ioc_,
+        redis_->set_job_runtime_async(workflow_id, job_data),
+        boost::asio::use_future);
+    ASSERT_TRUE(set_runtime_future.get());
+
+    auto set_payload_future = boost::asio::co_spawn(
+        ioc_,
+        redis_->set_job_payload_async(workflow_id, job_id, {1, 2, 3}),
+        boost::asio::use_future);
+    ASSERT_TRUE(set_payload_future.get());
+
+    auto enqueue_future = boost::asio::co_spawn(
+        ioc_,
+        redis_->enqueue_job_for_execution_async(
+            workflow_id,
+            PrioritizedJob{job_id, job_data.job_uuid, job_data.priority}),
+        boost::asio::use_future);
+    ASSERT_TRUE(enqueue_future.get());
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    bool dequeued = false;
+    while (std::chrono::steady_clock::now() < deadline) {
+        long long queue_size = -1;
+        auto queue_size_future = boost::asio::co_spawn(
+            ioc_,
+            redis_->get_execution_queue_size_async(queue_size),
+            boost::asio::use_future);
+
+        if (queue_size_future.get() && queue_size == 0) {
+            dequeued = true;
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+
+    EXPECT_TRUE(dequeued);
+
+    active_scheduler->request_stop();
+    active_scheduler->request_stop();
+    active_scheduler.reset();
+
+    work_guard.reset();
+    io_thread.join();
+
+    run_async(ioc_, redis_->clear_execution_queue_async());
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_job_payload_async(workflow_id, job_id)));
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {job_data})));
+}

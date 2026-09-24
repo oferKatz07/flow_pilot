@@ -62,6 +62,7 @@ set(FLOW_PILOT_SOURCES
     src/http_server.cpp
     src/workflow_runtime_generator.cpp
     src/workflow_admission_service.cpp
+    src/flow_pilot_runtime.cpp
     src/completion_handler.cpp
     src/scheduler.cpp
     src/worker_thread.cpp
@@ -98,7 +99,9 @@ add_executable(flow_pilot_tests
     tests/async_sqlite_db_test.cpp
     tests/redis_db_async_validator_test.cpp
     tests/completion_handler_test.cpp
+    tests/flow_pilot_functional_test.cpp
     tests/scheduler_worker_test.cpp
+    tests/process_shutdown_test.cpp
 )
 
 target_include_directories(flow_pilot_tests PRIVATE include)
@@ -109,6 +112,7 @@ target_link_libraries(flow_pilot_tests PRIVATE
 )
 
 target_compile_definitions(flow_pilot_tests PRIVATE WORKFLOW_SCHEMA_PATH="${CMAKE_SOURCE_DIR}/schema/workflow_request.schema.json")
+target_compile_definitions(flow_pilot_tests PRIVATE FLOW_PILOT_EXECUTABLE=\"$<TARGET_FILE:flow_pilot>\")
 
 # Enable testing
 enable_testing()

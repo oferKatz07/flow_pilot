@@ -3,8 +3,12 @@
 
 #include "request_handlers.h"
 #include "workflow_admission_service.h"
+#include "db_factory.h"
 #include "logger.h"
 #include "config.h"
+#include "flow_pilot_runtime.h"
+
+#include <algorithm>
 
 namespace flow_pilot {
 using namespace boost::asio;
@@ -36,6 +40,32 @@ static inline std::vector<std::string_view> split_path(std::string_view target)
     }
 
     return segments;
+}
+
+static std::string get_query_param(std::string_view target, std::string_view name)
+{
+    const auto query_pos = target.find('?');
+    if (query_pos == std::string_view::npos) {
+        return {};
+    }
+
+    std::string_view query = target.substr(query_pos + 1);
+    while (!query.empty()) {
+        const auto next_param = query.find('&');
+        const auto param = query.substr(0, next_param);
+        const auto equals = param.find('=');
+
+        if (equals != std::string_view::npos && param.substr(0, equals) == name) {
+            return std::string(param.substr(equals + 1));
+        }
+
+        if (next_param == std::string_view::npos) {
+            break;
+        }
+        query.remove_prefix(next_param + 1);
+    }
+
+    return {};
 }
 
 static http::response<http::string_body> make_json_response(
@@ -78,6 +108,26 @@ static std::string build_validation_success_response(const std::string_view& wor
     return response.dump();
 }
 
+static json workflow_status_to_json(const WorkflowData& workflow,
+                                    const std::vector<WorkflowJob>& jobs)
+{
+    json response;
+    response["client_id"] = workflow.info.client_id;
+    response["workflow_id"] = workflow.info.workflow_id;
+    response["status"] = std::string(to_string(workflow.status));
+    response["total_jobs"] = workflow.total_jobs;
+    response["jobs"] = json::array();
+
+    for (const auto& job : jobs) {
+        response["jobs"].push_back({
+            {"job_id", job.job_id},
+            {"status", std::string(to_string(job.status))}
+        });
+    }
+
+    return response;
+}
+
 WorkflowValidationHandler::WorkflowValidationHandler()
     : workflow_service_(Config::get().workflow().workflow_schema_path) {
 }
@@ -108,8 +158,14 @@ WorkflowValidationHandler::handle(const HandlerCtxData& ctx) {
             build_validation_error_response(validation));
     }
 
+    std::string workflow_id;
+    try {
+        workflow_id = json::parse(ctx.request_body).value("workflow_id", std::string());
+    } catch (...) {
+    }
+
     co_return make_json_response(http::status::accepted, ctx.keep_alive,
-        build_validation_success_response(error_msgs::WORKFLOW_ADMITTED));
+        build_validation_success_response(workflow_id));
 }
 
 // Handler for GET /api/v1/workflows
@@ -125,14 +181,41 @@ GetWorkflowListHandler::handle(const HandlerCtxData& ctx) {
 // Handler for GET /api/v1/workflows/{workflow_id}
 awaitable<http::response<http::string_body>>
 GetWorkflowHandler::handle(const HandlerCtxData& ctx) {
-    Logger::get_logger()->info("Getting workflow: {} - Returning feature not implemented response", ctx.workflow_id);
-    // json response;
-    // response["workflow_id"] = workflow_id_;
-    // response["status"] = "unknown";
-    // response["message"] = "workflow fetch handler not implemented";    
-    // return make_json_response(http::status::not_implemented, keep_alive, response.dump());
+    Logger::get_logger()->info("Getting workflow: {} for client: {}", ctx.workflow_id, ctx.client_id);
 
-    co_return make_header_only_response(http::status::not_implemented, ctx.keep_alive);
+    if (ctx.client_id.empty()) {
+        co_return make_json_response(http::status::bad_request, ctx.keep_alive,
+            "{\"error\":\"client_id query parameter is required\"}");
+    }
+
+    std::vector<WorkflowData> workflows;
+    if (!co_await DBFactory::get().get_all_workflows_for_client_async(ctx.client_id, workflows)) {
+        co_return make_json_response(http::status::internal_server_error, ctx.keep_alive,
+            "{\"error\":\"failed to read workflow status\"}");
+    }
+
+    const auto workflow_it = std::find_if(
+        workflows.begin(),
+        workflows.end(),
+        [&ctx](const WorkflowData& workflow) {
+            return workflow.info.workflow_id == ctx.workflow_id;
+        });
+    if (workflow_it == workflows.end()) {
+        co_return make_json_response(http::status::not_found, ctx.keep_alive,
+            "{\"error\":\"workflow not found\"}");
+    }
+
+    std::vector<WorkflowJob> jobs;
+    if (!co_await DBFactory::get().get_all_jobs_for_workflow_async(
+            ctx.client_id,
+            std::string(ctx.workflow_id),
+            jobs)) {
+        co_return make_json_response(http::status::internal_server_error, ctx.keep_alive,
+            "{\"error\":\"failed to read workflow jobs\"}");
+    }
+
+    co_return make_json_response(http::status::ok, ctx.keep_alive,
+        workflow_status_to_json(*workflow_it, jobs).dump());
 }
 
 // Handler for DELETE /api/v1/workflows/{workflow_id}
@@ -159,6 +242,27 @@ CancelWorkflowHandler::handle(const HandlerCtxData& ctx) {
     // return make_json_response(http::status::not_implemented, keep_alive, response.dump());
 
     co_return make_header_only_response(http::status::not_implemented, ctx.keep_alive);
+}
+
+awaitable<http::response<http::string_body>>
+RuntimeStatusHandler::handle(const HandlerCtxData& ctx) {
+    const auto* runtime = FlowPilotRuntime::active_runtime();
+    if (runtime == nullptr) {
+        co_return make_json_response(http::status::service_unavailable, ctx.keep_alive,
+            "{\"status\":\"unavailable\",\"error\":\"runtime is not available\"}");
+    }
+
+    const auto runtime_status = runtime->status();
+    json response;
+    response["status"] = runtime_status.shutting_down ? "shutting_down" :
+                         (runtime_status.started ? "running" : "stopped");
+    response["started"] = runtime_status.started;
+    response["shutting_down"] = runtime_status.shutting_down;
+    response["redis_io_threads"] = runtime_status.redis_io_threads;
+    response["scheduler_count"] = runtime_status.scheduler_count;
+    response["completion_handler_count"] = runtime_status.completion_handler_count;
+
+    co_return make_json_response(http::status::ok, ctx.keep_alive, response.dump());
 }
 
 awaitable<http::response<http::string_body>>
@@ -196,6 +300,17 @@ IHandler& HandlerFactory::get_handler(const http::request<http::string_body>& re
         return error_handler_;
     }
 
+    if (segments.size() == 4 && segments[0] == "api" && segments[1] == "v1" &&
+        segments[2] == "runtime" && segments[3] == "status") {
+        if (method == http::verb::get) {
+            ctx.keep_alive = keep_alive;
+            return runtime_status_handler_;
+        }
+
+        ctx.error_status_ = http::status::method_not_allowed;
+        return error_handler_;
+    }
+
     // Workflows endpoints
     if (segments.size() >= 3 && segments[0] == "api" && segments[1] == "v1" && 
         segments[2] == "workflows") {
@@ -210,12 +325,16 @@ IHandler& HandlerFactory::get_handler(const http::request<http::string_body>& re
         if (segments.size() == 3 && method == http::verb::post) {
             ctx.request_body = std::move(body);
             ctx.keep_alive = keep_alive;
-            return workflow_validation_handler_;
+            if (!workflow_validation_handler_) {
+                workflow_validation_handler_ = std::make_unique<WorkflowValidationHandler>();
+            }
+            return *workflow_validation_handler_;
         }
         
         // Get specific workflow
         if (segments.size() == 4 && method == http::verb::get) {
             ctx.workflow_id = segments[3];
+            ctx.client_id = get_query_param(req.target(), "client_id");
             ctx.keep_alive = keep_alive;
             return get_workflow_handler_;
         }

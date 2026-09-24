@@ -1,32 +1,52 @@
-
 // scheduler.cpp 
 
 #include "scheduler.h"
 
+#include "logger.h"
+#include "redis_db_async.h"
+
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/executor_work_guard.hpp>
+#include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/use_future.hpp>
 #include <boost/uuid/random_generator.hpp>
 #include <boost/uuid/uuid_io.hpp>
 #include <chrono>
-#include <future>
+#include <exception>
 
 namespace flow_pilot {
 
 
 scheduler::scheduler(std::size_t worker_thread_count, std::size_t worker_queue_capacity) :
     scheduler_uuid_(boost::uuids::to_string(boost::uuids::random_generator()())),
+    scheduler_redis_connection_id_(scheduler_uuid_ + "-scheduler"),
     worker_thread_queue_(worker_queue_capacity == 0 ? 1 : worker_queue_capacity),
     running_(true)
 {
-    RedisDatabaseAsync::get_instance()->register_scheduler(scheduler_uuid_);
+    RedisDatabaseAsync::get_instance()->register_scheduler(scheduler_redis_connection_id_);
     const auto thread_count = worker_thread_count == 0 ? 1 : worker_thread_count;
+    workers_.reserve(thread_count);
     for (std::size_t i = 0; i < thread_count; ++i) {
-        worker_threads_.emplace_back([this]() {
-            WorkerThread worker(*this);
-            worker.main_worker_loop();
+        workers_.emplace_back(std::make_unique<WorkerThread>(*this));
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(worker_loops_finished_mutex_);
+        running_worker_loops_ = workers_.size();
+    }
+
+    worker_threads_.reserve(workers_.size());
+    for (auto& worker : workers_) {
+        WorkerThread* worker_ptr = worker.get();
+        worker_threads_.emplace_back([this, worker_ptr]() {
+            try {
+                worker_ptr->run_worker_loop();
+            } catch (const std::exception& e) {
+                Logger::get_logger()->error("Worker loop failed: {}", e.what());
+            } catch (...) {
+                Logger::get_logger()->error("Worker loop failed with an unknown exception");
+            }
+            mark_worker_loop_finished();
         });
     }
 
@@ -34,24 +54,16 @@ scheduler::scheduler(std::size_t worker_thread_count, std::size_t worker_queue_c
 }
 
 scheduler::~scheduler() {
-    stop();
-
-    // Wake workers blocked on an empty/full queue and the dispatcher blocked in Redis.
-    worker_thread_queue_.close();
-    RedisDatabaseAsync::get_instance()->deregister_scheduler(scheduler_uuid_);
-
+    request_stop();
     wait_for_main_loop_finished();
 
-    if (scheduler_thread_.joinable()) {
-        scheduler_thread_.join();
-    }
-
-    // Join threads to wait for completion
-    for (auto& t : worker_threads_) {
-        if (t.joinable()) {
-            t.join();
+    for (auto& worker_thread : worker_threads_) {
+        if (worker_thread.joinable()) {
+            worker_thread.join();
         }
     }
+
+    wait_for_worker_loops_finished();
 }
 
 boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
@@ -81,6 +93,17 @@ boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
     mark_main_loop_finished();
 }
 
+void scheduler::request_stop() {
+    bool was_running = true;
+    if (!running_.compare_exchange_strong(was_running, false, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    // Wake workers blocked on an empty/full queue and the dispatcher blocked in Redis.
+    worker_thread_queue_.close();
+    RedisDatabaseAsync::get_instance()->deregister_scheduler(scheduler_redis_connection_id_);
+}
+
 bool scheduler::fetch_job(JobExeData& job_exe_data) {
     return worker_thread_queue_.pop(job_exe_data);
 }
@@ -89,21 +112,24 @@ bool scheduler::fetch_job(JobExeData& job_exe_data) {
 //                                 Private Methods                                //
 ////////////////////////////////////////////////////////////////////////////////////
 void scheduler::start() {
-    scheduler_thread_ = std::thread([this]() {
-        auto redis_db = RedisDatabaseAsync::get_instance();
-        auto& ioc = redis_db->io_context();
-        auto work_guard = boost::asio::make_work_guard(ioc);
-        auto main_loop_future = boost::asio::co_spawn(
-            ioc,
-            scheduler_main_loop(),
-            boost::asio::use_future);
+    auto redis_db = RedisDatabaseAsync::get_instance();
+    auto& ioc = redis_db->io_context();
 
-        while (main_loop_future.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-            ioc.run_for(std::chrono::milliseconds(50));
-        }
-
-        main_loop_future.get();
-    });
+    boost::asio::co_spawn(
+        ioc,
+        [this]() -> boost::asio::awaitable<void> {
+            try {
+                co_await scheduler_main_loop();
+            } catch (const std::exception& e) {
+                Logger::get_logger()->error("Scheduler main loop failed: {}", e.what());
+                mark_main_loop_finished();
+            } catch (...) {
+                Logger::get_logger()->error("Scheduler main loop failed with an unknown exception");
+                mark_main_loop_finished();
+            }
+            co_return;
+        },
+        boost::asio::detached);
 }
 
 void scheduler::mark_main_loop_finished() {
@@ -125,10 +151,27 @@ void scheduler::wait_for_main_loop_finished() {
     });
 }
 
+void scheduler::mark_worker_loop_finished() {
+    {
+        std::lock_guard<std::mutex> lock(worker_loops_finished_mutex_);
+        if (running_worker_loops_ > 0) {
+            --running_worker_loops_;
+        }
+    }
+    worker_loops_finished_cv_.notify_all();
+}
+
+void scheduler::wait_for_worker_loops_finished() {
+    std::unique_lock<std::mutex> lock(worker_loops_finished_mutex_);
+    worker_loops_finished_cv_.wait(lock, [this]() {
+        return running_worker_loops_ == 0;
+    });
+}
+
 boost::asio::awaitable<bool> scheduler::get_next_ready_job(JobExeData& job_info) {
     auto redis_db = RedisDatabaseAsync::get_instance();
     while (running_.load(std::memory_order_acquire)) {
-        if (co_await redis_db->blocking_dequeue_job_for_execution_async(job_info.identity, job_info.job_id, scheduler_uuid_)) {
+        if (co_await redis_db->blocking_dequeue_job_for_execution_async(job_info.identity, job_info.job_id, scheduler_redis_connection_id_)) {
             co_return true;
         }
 
@@ -139,8 +182,8 @@ boost::asio::awaitable<bool> scheduler::get_next_ready_job(JobExeData& job_info)
 
         // A failed blocking dequeue means this scheduler's dedicated Redis connection may be broken.
         // Drop it, try to create a fresh one
-        redis_db->deregister_scheduler(scheduler_uuid_);
-        if (!redis_db->register_scheduler(scheduler_uuid_)) {
+        redis_db->deregister_scheduler(scheduler_redis_connection_id_);
+        if (!redis_db->register_scheduler(scheduler_redis_connection_id_)) {
             // Sleep for 1 second to avoid a tight retry loop if Redis is still unavailable
             auto executor = co_await boost::asio::this_coro::executor;
             boost::asio::steady_timer retry_timer(executor, std::chrono::seconds(1));

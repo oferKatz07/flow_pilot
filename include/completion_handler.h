@@ -1,12 +1,12 @@
-
 // completion_handler.h 
 
 #pragma once
 
 #include <boost/asio/awaitable.hpp>
-#include <string>
 #include <atomic>
-#include <thread>
+#include <condition_variable>
+#include <mutex>
+#include <string>
 #include <unordered_map>
 
 #include "flow_pilot_error_msgs.h"
@@ -32,12 +32,12 @@ public:
     boost::asio::awaitable<void> completion_handler_main_loop() override;
     boost::asio::awaitable<bool> get_completed_jobs(JobCompletionData& completion_data) override;
     boost::asio::awaitable<bool> process_completed_jobs(JobCompletionData& completion_data) override;
+    void request_stop();
 
 private:
     void start();
-    void stop() {
-        running_.store(false, std::memory_order_release);
-    }
+    void mark_main_loop_finished();
+    void wait_for_main_loop_finished();
 
     boost::asio::awaitable<bool> handle_job_completed(
         const JobCompletionData& completion_data,
@@ -54,8 +54,11 @@ private:
         const JobCompletionData& completion_data,
         const std::unordered_map<std::string, std::string>& workflow_fields);
 
-    std::thread completion_handler_thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> main_loop_started_{false};
+    bool main_loop_finished_{false};
+    std::mutex main_loop_finished_mutex_;
+    std::condition_variable main_loop_finished_cv_;
 };
 
 } // namespace flow_pilot

@@ -414,6 +414,10 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
         }
 
         if (ready_job_key.empty()) {
+            std::lock_guard<std::mutex> lock(scheduler_clients_mutex_);
+            if (scheduler_blocking_clients_.find(scheduler_id) == scheduler_blocking_clients_.end()) {
+                co_return false;
+            }
             continue;
         }
 
