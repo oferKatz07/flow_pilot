@@ -85,7 +85,7 @@ std::shared_ptr<IRedisDatabaseAsync> get_redis_database_async()
     return RedisDatabaseAsync::get_instance();
 }
 
-struct RedisDatabaseAsync::ImplAsync {
+struct ImplAsync {
     explicit ImplAsync(boost::asio::io_context& ioc)
         : socket_(ioc), resolver_(ioc), read_buffer_() {}
 
@@ -254,19 +254,51 @@ private:
 std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::instance_ = nullptr;
 std::once_flag RedisDatabaseAsync::init_flag_;
 
-RedisDatabaseAsync::RedisDatabaseAsync(boost::asio::io_context& ioc)
-    : ioc_(ioc),
-      impl_async_(std::make_unique<ImplAsync>(ioc)),
+RedisConnectionContext::RedisConnectionContext(boost::asio::io_context& ioc)
+    : connection_(std::make_unique<ImplAsync>(ioc)),
       command_executor_(std::make_unique<RedisCommandExecutor>(
           [this](const std::vector<std::string>& args) -> boost::asio::awaitable<RedisReply> {
-              co_return co_await impl_async_->execute_async(args);
+              co_return co_await connection_->execute_async(args);
           }))
 {
     const InMemoryDBConfig& config = Config::get().redis();
-    std::string connection_string = config.host + ":" + std::to_string(config.port);
-    if (!connect(connection_string, config.password)) {
-        throw std::runtime_error("Unable to connect to Redis at " + connection_string);
+    const std::string connection_string = config.host + ":" + std::to_string(config.port);
+    std::string host = "127.0.0.1";
+    std::string port = "6379";
+    std::string auth_password = config.password;
+    if (!parse_connection_string(connection_string, host, port, auth_password)) {
+        throw std::runtime_error("Invalid Redis connection string " + connection_string);
     }
+
+    std::string error_message;
+    if (!connection_->connect(host, port, error_message)) {
+        throw std::runtime_error("Unable to connect to Redis at " + connection_string + ": " + error_message);
+    }
+}
+
+RedisConnectionContext::~RedisConnectionContext() = default;
+
+RedisCommandExecutor& RedisConnectionContext::command_executor()
+{
+    return *command_executor_;
+}
+
+const RedisCommandExecutor& RedisConnectionContext::command_executor() const
+{
+    return *command_executor_;
+}
+
+void RedisConnectionContext::close()
+{
+    connection_->close();
+}
+
+RedisDatabaseAsync::RedisDatabaseAsync(boost::asio::io_context& ioc)
+    : ioc_(ioc),
+      default_connection_context_(std::make_unique<RedisConnectionContext>(ioc)),
+      command_executor_(&default_connection_context_->command_executor()),
+      queue_read_timeout_(Config::get().redis().queue_read_timeout_ms)
+{
 }
 
 RedisDatabaseAsync::~RedisDatabaseAsync() = default;
@@ -285,6 +317,7 @@ std::shared_ptr<RedisDatabaseAsync> RedisDatabaseAsync::init(boost::asio::io_con
 {
     std::call_once(init_flag_, [&]() {
         auto instance = std::shared_ptr<RedisDatabaseAsync>(new RedisDatabaseAsync(ioc));
+        instance->queue_read_timeout_ = std::chrono::milliseconds(config.queue_read_timeout_ms);
         std::string connection_string = config.host + ":" + std::to_string(config.port);
         if (!instance->connect(connection_string, config.password)) {
             throw std::runtime_error("Unable to connect to Redis at " + connection_string);
@@ -330,7 +363,7 @@ bool RedisDatabaseAsync::connect(const std::string& connection_string, const std
     }
 
     std::string error_message;
-    bool connected = impl_async_->connect(host, port, error_message);
+    bool connected = default_connection_context_->connection_->connect(host, port, error_message);
     if (!connected) {
         Logger::get_logger()->error("Redis connection failed: {}", error_message);
         return false;
@@ -407,9 +440,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
 
     std::string ready_job_key;
     while (true) {
-        // Block for up to one second waiting for the next prioritized job key.
+        // Block for the configured timeout waiting for the next prioritized job key.
         // An empty key is a timeout/no-work result, not a failure, so keep polling.
-        if (!co_await blocking_executor.execute_zset_blocking_dequeue_command_async(EXECUTION_QUEUE_KEY, ready_job_key, 1)) {
+        if (!co_await blocking_executor.execute_zset_blocking_dequeue_command_async(EXECUTION_QUEUE_KEY, ready_job_key, queue_read_timeout_)) {
             co_return false;
         }
 
@@ -491,6 +524,85 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
     }
 }
 
+boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execution_async(
+    RedisConnectionContext& context,
+    WorkflowIdentity& workflow_id,
+    std::string& ready_job,
+    const std::string& scheduler_id) {
+    std::string ready_job_key;
+
+    if (!co_await context.command_executor().execute_zset_blocking_dequeue_command_async(EXECUTION_QUEUE_KEY, ready_job_key, queue_read_timeout_)) {
+        co_return false;
+    }
+
+    if (ready_job_key.empty()) {
+        co_return false;
+    }
+
+    std::string job_type;
+    std::vector<std::string> type_args{"TYPE", ready_job_key};
+    if (!co_await context.command_executor().execute_bulk_string_command_async(type_args, job_type)) {
+        co_return false;
+    }
+
+    if (job_type == "none") {
+        co_return false;
+    }
+
+    if (job_type != "hash") {
+        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} type {} was dequeued",
+                                    ready_job_key,
+                                    job_type);
+        co_return false;
+    }
+
+    constexpr std::string_view job_key_prefix = "fp:job:";
+    if (ready_job_key.rfind(job_key_prefix, 0) != 0) {
+        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
+                                    ready_job_key);
+        co_return false;
+    }
+
+    size_t substr_start_pos = job_key_prefix.size();
+    size_t substr_end_pos = ready_job_key.find(":", substr_start_pos);
+    if (substr_end_pos == std::string::npos) {
+        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
+                                    ready_job_key);
+        co_return false;
+    }
+
+    std::string client_id = ready_job_key.substr(substr_start_pos, substr_end_pos - substr_start_pos);
+    substr_start_pos = substr_end_pos + 1;
+
+    substr_end_pos = ready_job_key.find(":", substr_start_pos);
+    if (substr_end_pos == std::string::npos) {
+        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
+                                    ready_job_key);
+        co_return false;
+    }
+
+    std::string workflow_id_value = ready_job_key.substr(substr_start_pos, substr_end_pos - substr_start_pos);
+    substr_start_pos = substr_end_pos + 1;
+
+    std::string job_id = ready_job_key.substr(substr_start_pos);
+    if (client_id.empty() || workflow_id_value.empty() || job_id.empty()) {
+        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
+                                    ready_job_key);
+        co_return false;
+    }
+
+    std::unordered_map<std::string, std::string> fields{{"owned_by", scheduler_id}};
+    if (!co_await context.command_executor().execute_hset_command_async(ready_job_key, fields)) {
+        co_return false;
+    }
+
+    workflow_id.client_id = std::move(client_id);
+    workflow_id.workflow_id = std::move(workflow_id_value);
+    ready_job = std::move(job_id);
+
+    co_return true;
+}
+
 boost::asio::awaitable<void> RedisDatabaseAsync::wait_for_ready_job_event_async(std::string scheduler_id) {
     ImplAsync subscriber(ioc_);
     std::string error_message;
@@ -544,6 +656,13 @@ boost::asio::awaitable<void> RedisDatabaseAsync::wait_for_ready_job_event_async(
 boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job_completion_event_async(
     std::chrono::milliseconds timeout)
 {
+    co_return co_await wait_for_job_completion_event_async(*default_connection_context_, timeout);
+}
+
+boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job_completion_event_async(
+    RedisConnectionContext& context,
+    std::chrono::milliseconds timeout)
+{
     ImplAsync subscriber(ioc_);
     std::string error_message;
     if (!subscriber.connect(host_, port_, error_message)) {
@@ -561,20 +680,9 @@ boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job
             co_return JobCompletionWaitResult::ERROR;
         }
 
-        ImplAsync stream_checker(ioc_);
-        if (!stream_checker.connect(host_, port_, error_message)) {
-            Logger::get_logger()->error("wait_for_job_completion_event_async - failed to connect stream checker: {}",
-                                        error_message);
-            co_return JobCompletionWaitResult::ERROR;
-        }
-        RedisCommandExecutor stream_check_executor(
-            [&stream_checker](const std::vector<std::string>& args) -> boost::asio::awaitable<RedisReply> {
-                co_return co_await stream_checker.execute_async(args);
-            });
-
         long long stream_size = 0;
         std::vector<std::string> len_args{"XLEN", JOB_COMPLETION_STREAM_KEY};
-        if (!co_await stream_check_executor.execute_integer_command_async(len_args, stream_size)) {
+        if (!co_await context.command_executor().execute_integer_command_async(len_args, stream_size)) {
             Logger::get_logger()->error("wait_for_job_completion_event_async - failed to check completion stream length");
             co_return JobCompletionWaitResult::ERROR;
         }

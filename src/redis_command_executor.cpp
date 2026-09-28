@@ -2,6 +2,8 @@
 
 #include <boost/asio/error.hpp>
 #include <boost/system/system_error.hpp>
+#include <chrono>
+#include <sstream>
 #include <string_view>
 #include <utility>
 
@@ -21,7 +23,19 @@ bool is_expected_shutdown_cancellation(const boost::system::system_error& ex)
 bool is_expected_shutdown_cancellation(std::string_view message)
 {
     return message.find("Operation canceled") != std::string_view::npos ||
-           message.find("Bad file descriptor") != std::string_view::npos;
+           message.find("Bad file descriptor") != std::string_view::npos ||
+           message.find("Empty reply from Redis") != std::string_view::npos;
+}
+
+std::string redis_timeout_seconds(std::chrono::milliseconds timeout)
+{
+    if (timeout.count() % 1000 == 0) {
+        return std::to_string(timeout.count() / 1000);
+    }
+
+    std::ostringstream stream;
+    stream << timeout.count() / 1000.0;
+    return stream.str();
 }
 
 } // namespace
@@ -385,10 +399,10 @@ boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_dequeue_command_
 boost::asio::awaitable<bool> RedisCommandExecutor::execute_zset_blocking_dequeue_command_async(
     std::string key,
     std::string& member,
-    int timeout_seconds) const
+    std::chrono::milliseconds timeout) const
 {
     try {
-        std::vector<std::string> args{"BZPOPMAX", key, std::to_string(timeout_seconds)};
+        std::vector<std::string> args{"BZPOPMAX", key, redis_timeout_seconds(timeout)};
         auto reply = co_await execute_(args);
         if (reply.type == RedisReply::Type::Array) {
             if (reply.array_value.empty()) {

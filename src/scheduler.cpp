@@ -20,10 +20,10 @@ namespace flow_pilot {
 scheduler::scheduler(std::size_t worker_thread_count, std::size_t worker_queue_capacity) :
     scheduler_uuid_(boost::uuids::to_string(boost::uuids::random_generator()())),
     scheduler_redis_connection_id_(scheduler_uuid_ + "-scheduler"),
+    redis_context_(std::make_unique<RedisConnectionContext>(RedisDatabaseAsync::get_instance()->io_context())),
     worker_thread_queue_(worker_queue_capacity == 0 ? 1 : worker_queue_capacity),
     running_(true)
 {
-    RedisDatabaseAsync::get_instance()->register_scheduler(scheduler_redis_connection_id_);
     const auto thread_count = worker_thread_count == 0 ? 1 : worker_thread_count;
     workers_.reserve(thread_count);
     for (std::size_t i = 0; i < thread_count; ++i) {
@@ -68,7 +68,6 @@ scheduler::~scheduler() {
 
 boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
     auto redis_db = RedisDatabaseAsync::get_instance();
-    main_loop_started_.store(true, std::memory_order_release);
 
     while (running_.load(std::memory_order_acquire)) {
         JobExeData job_info;
@@ -83,7 +82,7 @@ boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
 
         // Get the job payload from the workflow runtime data
         // TBD check return status and handle errors
-        co_await redis_db->fetch_job_payload_async(job_info.identity, job_info.job_id, job_info.payload);
+        co_await redis_db->fetch_job_payload_async(*redis_context_, job_info.identity, job_info.job_id, job_info.payload);
 
         if (!worker_thread_queue_.push(std::move(job_info))) {
             break;
@@ -101,7 +100,7 @@ void scheduler::request_stop() {
 
     // Wake workers blocked on an empty/full queue and the dispatcher blocked in Redis.
     worker_thread_queue_.close();
-    RedisDatabaseAsync::get_instance()->deregister_scheduler(scheduler_redis_connection_id_);
+    redis_context_->close();
 }
 
 bool scheduler::fetch_job(JobExeData& job_exe_data) {
@@ -112,6 +111,8 @@ bool scheduler::fetch_job(JobExeData& job_exe_data) {
 //                                 Private Methods                                //
 ////////////////////////////////////////////////////////////////////////////////////
 void scheduler::start() {
+    main_loop_started_.store(true, std::memory_order_release);
+
     auto redis_db = RedisDatabaseAsync::get_instance();
     auto& ioc = redis_db->io_context();
 
@@ -171,23 +172,13 @@ void scheduler::wait_for_worker_loops_finished() {
 boost::asio::awaitable<bool> scheduler::get_next_ready_job(JobExeData& job_info) {
     auto redis_db = RedisDatabaseAsync::get_instance();
     while (running_.load(std::memory_order_acquire)) {
-        if (co_await redis_db->blocking_dequeue_job_for_execution_async(job_info.identity, job_info.job_id, scheduler_redis_connection_id_)) {
+        if (co_await redis_db->blocking_dequeue_job_for_execution_async(*redis_context_, job_info.identity, job_info.job_id, scheduler_redis_connection_id_)) {
             co_return true;
         }
 
         if (!running_.load(std::memory_order_acquire)) {
             // If the scheduler is stopping, exit the loop and return false
             co_return false;
-        }
-
-        // A failed blocking dequeue means this scheduler's dedicated Redis connection may be broken.
-        // Drop it, try to create a fresh one
-        redis_db->deregister_scheduler(scheduler_redis_connection_id_);
-        if (!redis_db->register_scheduler(scheduler_redis_connection_id_)) {
-            // Sleep for 1 second to avoid a tight retry loop if Redis is still unavailable
-            auto executor = co_await boost::asio::this_coro::executor;
-            boost::asio::steady_timer retry_timer(executor, std::chrono::seconds(1));
-            co_await retry_timer.async_wait(boost::asio::use_awaitable);
         }
     }
 

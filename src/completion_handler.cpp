@@ -52,6 +52,7 @@ bool is_waiting_to_run(JobStatus status)
 } // namespace
 
 CompletionHandler::CompletionHandler(bool auto_start)
+    : redis_context_(std::make_unique<RedisConnectionContext>(RedisDatabaseAsync::get_instance()->io_context()))
 {
     if (auto_start) {
         start();
@@ -94,6 +95,7 @@ void CompletionHandler::request_stop()
     if (!running_.compare_exchange_strong(was_running, false, std::memory_order_acq_rel)) {
         return;
     }
+    redis_context_->close();
 }
 
 void CompletionHandler::mark_main_loop_finished()
@@ -151,7 +153,7 @@ boost::asio::awaitable<bool> CompletionHandler::get_completed_jobs(JobCompletion
     auto redis_db = RedisDatabaseAsync::get_instance();
 
     while (running_.load(std::memory_order_acquire)) {
-        const auto wait_result = co_await redis_db->wait_for_job_completion_event_async(JOB_COMPLETION_WAIT_TIMEOUT);
+        const auto wait_result = co_await redis_db->wait_for_job_completion_event_async(*redis_context_, JOB_COMPLETION_WAIT_TIMEOUT);
 
         if (wait_result == JobCompletionWaitResult::TIMEOUT) {
             continue;
@@ -162,7 +164,7 @@ boost::asio::awaitable<bool> CompletionHandler::get_completed_jobs(JobCompletion
             co_return false;
         }
 
-        if (!co_await redis_db->dequeue_job_completion_async(completion_data)) {
+        if (!co_await redis_db->dequeue_job_completion_async(*redis_context_, completion_data)) {
             Logger::get_logger()->error("Failed to dequeue job completion message");
             co_return false;
         }
@@ -181,7 +183,7 @@ boost::asio::awaitable<bool> CompletionHandler::process_completed_jobs(JobComple
     const auto& identity = completion_data.identity;
 
     std::unordered_map<std::string, std::string> workflow_fields;
-    if (!co_await redis_db->fetch_workflow_runtime_async(identity, workflow_fields) ||
+    if (!co_await redis_db->fetch_workflow_runtime_async(*redis_context_, identity, workflow_fields) ||
         workflow_fields.empty()) {
         Logger::get_logger()->error("process_completed_jobs - failed to fetch workflow runtime: client_id={}, workflow_id={}",
                                     identity.client_id,
@@ -196,7 +198,7 @@ boost::asio::awaitable<bool> CompletionHandler::process_completed_jobs(JobComple
 
     if (completion_data.status == JobStatus::FAILED) {
         JobRuntimeData job_runtime;
-        if (!co_await redis_db->fetch_job_runtime_async(identity, completion_data.job_id, job_runtime)) {
+        if (!co_await redis_db->fetch_job_runtime_async(*redis_context_, identity, completion_data.job_id, job_runtime)) {
             Logger::get_logger()->error("process_completed_jobs - failed to fetch job runtime: client_id={}, workflow_id={}, job_id={}",
                                         identity.client_id,
                                         identity.workflow_id,
@@ -240,7 +242,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_completed(
         {"status", std::string(to_string(JobStatus::COMPLETED))},
         {"last_update_time", now}
     };
-    if (!co_await redis_db->update_job_runtime_async(identity, completion_data.job_id, job_updates)) {
+    if (!co_await redis_db->update_job_runtime_async(*redis_context_, identity, completion_data.job_id, job_updates)) {
         co_return false;
     }
 
@@ -255,12 +257,12 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_completed(
         workflow_updates["status"] = std::string(to_string(WorkflowStatus::COMPLETED));
     }
 
-    if (!co_await redis_db->update_workflow_runtime_async(identity, workflow_updates)) {
+    if (!co_await redis_db->update_workflow_runtime_async(*redis_context_, identity, workflow_updates)) {
         co_return false;
     }
 
     std::string promoted_job_id;
-    if (!co_await redis_db->release_execution_slot_and_promote_ready_job_async(identity, promoted_job_id)) {
+    if (!co_await redis_db->release_execution_slot_and_promote_ready_job_async(*redis_context_, identity, promoted_job_id)) {
         co_return false;
     }
 
@@ -320,6 +322,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
         {"last_update_time", now}
     };
     if (!co_await redis_db->update_job_runtime_async(
+            *redis_context_,
             identity,
             completion_data.job_id,
             failed_job_updates)) {
@@ -345,6 +348,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
             {"last_update_time", now}
         };
         if (!co_await redis_db->update_job_runtime_async(
+                *redis_context_,
                 identity,
                 job.job_id,
                 canceled_job_updates)) {
@@ -357,11 +361,11 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
     }
 
     if (!queued_jobs_to_remove.empty() &&
-        !co_await redis_db->remove_jobs_from_execution_queue_async(identity, queued_jobs_to_remove)) {
+        !co_await redis_db->remove_jobs_from_execution_queue_async(*redis_context_, identity, queued_jobs_to_remove)) {
         co_return false;
     }
 
-    if (!co_await redis_db->delete_workflow_waiting_ready_jobs(identity)) {
+    if (!co_await redis_db->delete_workflow_waiting_ready_jobs(*redis_context_, identity)) {
         co_return false;
     }
 
@@ -374,6 +378,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
         {"last_update_time", now}
     };
     if (!co_await redis_db->update_workflow_runtime_async(
+            *redis_context_,
             identity,
             failed_workflow_updates)) {
         co_return false;
@@ -403,6 +408,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_retry(
         {"last_update_time", now_as_string()}
     };
     if (!co_await redis_db->update_job_runtime_async(
+            *redis_context_,
             identity,
             completion_data.job_id,
             retry_updates)) {
@@ -433,6 +439,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_canceled(
         {"last_update_time", now}
     };
     if (!co_await redis_db->update_job_runtime_async(
+            *redis_context_,
             identity,
             completion_data.job_id,
             canceled_job_updates)) {
@@ -444,6 +451,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_canceled(
         {"last_update_time", now}
     };
     if (!co_await redis_db->update_workflow_runtime_async(
+            *redis_context_,
             identity,
             canceled_workflow_updates)) {
         co_return false;

@@ -35,16 +35,30 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::queue_workflow_jobs_for_executi
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::remove_jobs_from_execution_queue_async(const WorkflowIdentity& workflow_id,
                                                                                         const PrioritizedJobsList& queued_jobs) {
+    co_return co_await remove_jobs_from_execution_queue_async(*default_connection_context_, workflow_id, queued_jobs);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::remove_jobs_from_execution_queue_async(RedisConnectionContext& context,
+                                                                                        const WorkflowIdentity& workflow_id,
+                                                                                        const PrioritizedJobsList& queued_jobs) {
     std::vector<std::string> members;
     members.reserve(queued_jobs.size());
 
     for (const auto& job_info : queued_jobs) {
         members.push_back(RedisKeys::job_key(workflow_id, job_info.job_id));
     }
-    co_return co_await command_executor_->execute_zset_remove_command_async(EXECUTION_QUEUE_KEY, std::move(members));
+    co_return co_await context.command_executor().execute_zset_remove_command_async(EXECUTION_QUEUE_KEY, std::move(members));
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::release_execution_slot_and_promote_ready_job_async(
+    const WorkflowIdentity& workflow_id,
+    std::string& promoted_job_id)
+{
+    co_return co_await release_execution_slot_and_promote_ready_job_async(*default_connection_context_, workflow_id, promoted_job_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::release_execution_slot_and_promote_ready_job_async(
+    RedisConnectionContext& context,
     const WorkflowIdentity& workflow_id,
     std::string& promoted_job_id)
 {
@@ -104,7 +118,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::release_execution_slot_and_prom
     )lua";
 
     std::vector<std::string> values;
-    const auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, args, values);
+    const auto ok = co_await context.command_executor().execute_lua_script_async(lua_script, keys, args, values);
     if (!ok || values.empty() || values[0] != "1") {
         co_return false;
     }

@@ -111,6 +111,29 @@ enum class JobCompletionWaitResult {
 };
 
 struct InMemoryDBConfig;
+struct ImplAsync;
+
+class RedisConnectionContext {
+public:
+    explicit RedisConnectionContext(boost::asio::io_context& ioc);
+    ~RedisConnectionContext();
+
+    RedisConnectionContext(const RedisConnectionContext&) = delete;
+    RedisConnectionContext& operator=(const RedisConnectionContext&) = delete;
+    RedisConnectionContext(RedisConnectionContext&&) = delete;
+    RedisConnectionContext& operator=(RedisConnectionContext&&) = delete;
+
+    RedisCommandExecutor& command_executor();
+    const RedisCommandExecutor& command_executor() const;
+
+    void close();
+
+private:
+    friend class RedisDatabaseAsync;
+
+    std::unique_ptr<ImplAsync> connection_;
+    std::unique_ptr<RedisCommandExecutor> command_executor_;
+};
 
 class IRedisDatabaseAsync {
 public:
@@ -242,23 +265,42 @@ public:
     boost::asio::awaitable<bool> delete_workflow_runtime_data_async(const WorkflowRuntimeInfo& workflow_info) override;
     boost::asio::awaitable<bool> update_workflow_runtime_async(const WorkflowIdentity& workflow_id,
                                                                const std::unordered_map<std::string, std::string>& fields) override;
+    boost::asio::awaitable<bool> update_workflow_runtime_async(RedisConnectionContext& context,
+                                                               const WorkflowIdentity& workflow_id,
+                                                               const std::unordered_map<std::string, std::string>& fields);
     boost::asio::awaitable<bool> fetch_workflow_runtime_async(const WorkflowIdentity& workflow_id,
                                                               std::unordered_map<std::string, std::string>& workflow_data) const override;
+    boost::asio::awaitable<bool> fetch_workflow_runtime_async(RedisConnectionContext& context,
+                                                              const WorkflowIdentity& workflow_id,
+                                                              std::unordered_map<std::string, std::string>& workflow_data) const;
     boost::asio::awaitable<bool> create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
                                                                     const PrioritizedJobsList& ready_jobs) override;
     boost::asio::awaitable<bool> delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) override;
+    boost::asio::awaitable<bool> delete_workflow_waiting_ready_jobs(RedisConnectionContext& context,
+                                                                    const WorkflowIdentity& workflow_id);
     boost::asio::awaitable<bool> release_execution_slot_and_promote_ready_job_async(
         const WorkflowIdentity& workflow_id,
         std::string& promoted_job_id) override;
+    boost::asio::awaitable<bool> release_execution_slot_and_promote_ready_job_async(
+        RedisConnectionContext& context,
+        const WorkflowIdentity& workflow_id,
+        std::string& promoted_job_id);
     boost::asio::awaitable<bool> queue_workflow_jobs_for_execution_async(const WorkflowIdentity& workflow_id, 
                                                                          const PrioritizedJobsList& queued_jobs) override;
     boost::asio::awaitable<bool> remove_jobs_from_execution_queue_async(const WorkflowIdentity& workflow_id,
                                                                         const PrioritizedJobsList& queued_jobs) override;
+    boost::asio::awaitable<bool> remove_jobs_from_execution_queue_async(RedisConnectionContext& context,
+                                                                        const WorkflowIdentity& workflow_id,
+                                                                        const PrioritizedJobsList& queued_jobs);
     boost::asio::awaitable<bool> enqueue_job_for_execution_async(const WorkflowIdentity& workflow_id, 
                                                                  const PrioritizedJob& ready_job) override;
     boost::asio::awaitable<bool> blocking_dequeue_job_for_execution_async(WorkflowIdentity& workflow_id,
                                                                           std::string& ready_job,
                                                                           std::string scheduler_id) override;
+    boost::asio::awaitable<bool> blocking_dequeue_job_for_execution_async(RedisConnectionContext& context,
+                                                                          WorkflowIdentity& workflow_id,
+                                                                          std::string& ready_job,
+                                                                          const std::string& scheduler_id);
     boost::asio::awaitable<void> wait_for_ready_job_event_async(std::string scheduler_id) override;
     boost::asio::awaitable<bool> get_execution_queue_size_async(long long& size) const override;
     boost::asio::awaitable<void> clear_execution_queue_async() override;
@@ -266,22 +308,45 @@ public:
     boost::asio::awaitable<bool> update_job_runtime_async(const WorkflowIdentity& workflow_id, 
                                                           const std::string& job_id,
                                                           const std::unordered_map<std::string, std::string>& fields) override;
+    boost::asio::awaitable<bool> update_job_runtime_async(RedisConnectionContext& context,
+                                                          const WorkflowIdentity& workflow_id,
+                                                          const std::string& job_id,
+                                                          const std::unordered_map<std::string, std::string>& fields);
     boost::asio::awaitable<bool> fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
                                                          const std::string& job_id,
                                                          JobRuntimeData& job_data) const override;
+    boost::asio::awaitable<bool> fetch_job_runtime_async(RedisConnectionContext& context,
+                                                         const WorkflowIdentity& workflow_id,
+                                                         const std::string& job_id,
+                                                         JobRuntimeData& job_data) const;
     boost::asio::awaitable<bool> try_set_job_to_running_async(const WorkflowIdentity& workflow_id, 
                                                               const std::string& job_id, 
                                                               StartJobResult& result) override;
+    boost::asio::awaitable<bool> try_set_job_to_running_async(RedisConnectionContext& context,
+                                                              const WorkflowIdentity& workflow_id,
+                                                              const std::string& job_id,
+                                                              StartJobResult& result);
     boost::asio::awaitable<bool> enqueue_job_completion_async(const JobCompletionData& message) override;
+    boost::asio::awaitable<bool> enqueue_job_completion_async(RedisConnectionContext& context,
+                                                              const JobCompletionData& message);
     boost::asio::awaitable<bool> dequeue_job_completion_async(JobCompletionData& message) override;
+    boost::asio::awaitable<bool> dequeue_job_completion_async(RedisConnectionContext& context,
+                                                              JobCompletionData& message);
     boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_completion_event_async(
         std::chrono::milliseconds timeout) override;
+    boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_completion_event_async(
+        RedisConnectionContext& context,
+        std::chrono::milliseconds timeout);
     boost::asio::awaitable<bool> set_job_payload_async(const WorkflowIdentity& workflow_id,
                                                        const std::string& job_id, 
                                                        const std::vector<uint8_t>& payload) override;
     boost::asio::awaitable<bool> fetch_job_payload_async(const WorkflowIdentity& workflow_id,
                                                          const std::string& job_id,
                                                          std::vector<uint8_t>& payload) const override;
+    boost::asio::awaitable<bool> fetch_job_payload_async(RedisConnectionContext& context,
+                                                         const WorkflowIdentity& workflow_id,
+                                                         const std::string& job_id,
+                                                         std::vector<uint8_t>& payload) const;
     boost::asio::awaitable<bool> delete_workflow_runtime_async(const WorkflowIdentity& workflow_id) override;
     boost::asio::awaitable<bool> delete_all_workflow_jobs_async(const WorkflowIdentity& workflow_id, 
                                                                 const WorkflowJobsList& jobs) override;
@@ -294,10 +359,10 @@ public:
 private:
     explicit RedisDatabaseAsync(boost::asio::io_context& ioc);
     
-    struct ImplAsync;
     boost::asio::io_context& ioc_;
-    std::unique_ptr<ImplAsync> impl_async_;
-    std::unique_ptr<RedisCommandExecutor> command_executor_;
+    std::unique_ptr<RedisConnectionContext> default_connection_context_;
+    RedisCommandExecutor* command_executor_;
+    std::chrono::milliseconds queue_read_timeout_;
     std::mutex scheduler_clients_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ImplAsync>> scheduler_blocking_clients_;
 

@@ -111,6 +111,13 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::set_workflow_runtime_async(cons
 boost::asio::awaitable<bool> RedisDatabaseAsync::update_workflow_runtime_async(
      const WorkflowIdentity& workflow_id,
     const std::unordered_map<std::string, std::string>& fields) {
+    co_return co_await update_workflow_runtime_async(*default_connection_context_, workflow_id, fields);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::update_workflow_runtime_async(
+    RedisConnectionContext& context,
+    const WorkflowIdentity& workflow_id,
+    const std::unordered_map<std::string, std::string>& fields) {
     const auto workflow_key = RedisKeys::workflow_key(workflow_id);
     std::vector<std::string> keys{workflow_key};
     std::vector<std::string> args;
@@ -134,15 +141,22 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::update_workflow_runtime_async(
     )lua";
 
     std::vector<std::string> lua_values;
-    auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, args, lua_values);
+    auto ok = co_await context.command_executor().execute_lua_script_async(lua_script, keys, args, lua_values);
     co_return ok && !lua_values.empty() && lua_values[0] == "1";
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_workflow_runtime_async(
     const WorkflowIdentity& workflow_id,
     std::unordered_map<std::string, std::string>& workflow_data) const {
+    co_return co_await fetch_workflow_runtime_async(*default_connection_context_, workflow_id, workflow_data);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_workflow_runtime_async(
+    RedisConnectionContext& context,
+    const WorkflowIdentity& workflow_id,
+    std::unordered_map<std::string, std::string>& workflow_data) const {
     const auto workflow_key = RedisKeys::workflow_key(workflow_id);
-    co_return co_await command_executor_->execute_hgetall_command_async(workflow_key, workflow_data);
+    co_return co_await context.command_executor().execute_hgetall_command_async(workflow_key, workflow_data);
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
@@ -158,10 +172,16 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::create_workflow_waiting_ready_j
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::delete_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id) {
+    co_return co_await delete_workflow_waiting_ready_jobs(*default_connection_context_, workflow_id);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::delete_workflow_waiting_ready_jobs(
+    RedisConnectionContext& context,
+    const WorkflowIdentity& workflow_id) {
     std::string waiting_ready_job_key = RedisKeys::workflow_waiting_jobs_key(workflow_id);
     std::vector<std::string> args{"DEL", waiting_ready_job_key};
     long long value = 0;
-    co_return co_await command_executor_->execute_integer_command_async(args, value);
+    co_return co_await context.command_executor().execute_integer_command_async(args, value);
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::delete_workflow_runtime_async(const WorkflowIdentity& workflow_id) {

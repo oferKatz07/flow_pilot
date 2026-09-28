@@ -8,6 +8,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <filesystem>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <sys/types.h>
@@ -77,6 +78,24 @@ bool process_exited(pid_t pid, int& status)
     return result == pid;
 }
 
+void cleanup_test_db_directory()
+{
+    std::error_code ec;
+    std::filesystem::remove_all("db", ec);
+}
+
+class FlowPilotShutdownTest : public ::testing::Test {
+protected:
+    void SetUp() override
+    {
+        cleanup_test_db_directory();
+    }
+
+    void TearDown() override
+    {
+        cleanup_test_db_directory();
+    }
+};
 
 class ChildProcessGuard {
 public:
@@ -221,12 +240,12 @@ void expect_flow_pilot_exits_after_sigterm(const std::vector<std::string>& extra
 
 } // namespace
 
-TEST(FlowPilotShutdownTest, SigtermExitsProcessCleanly)
+TEST_F(FlowPilotShutdownTest, SigtermExitsProcessCleanly)
 {
     expect_flow_pilot_exits_after_sigterm({});
 }
 
-TEST(FlowPilotShutdownTest, SigtermExitsProcessCleanlyWithConfiguredThreadCounts)
+TEST_F(FlowPilotShutdownTest, SigtermExitsProcessCleanlyWithConfiguredThreadCounts)
 {
     expect_flow_pilot_exits_after_sigterm({
         "--redis-io-threads", "2",
@@ -235,7 +254,7 @@ TEST(FlowPilotShutdownTest, SigtermExitsProcessCleanlyWithConfiguredThreadCounts
     });
 }
 
-TEST(FlowPilotShutdownTest, RuntimeStatusReportsConfiguredComponents)
+TEST_F(FlowPilotShutdownTest, RuntimeStatusReportsConfiguredComponents)
 {
 #ifndef FLOW_PILOT_EXECUTABLE
     GTEST_SKIP() << "FLOW_PILOT_EXECUTABLE is not configured";

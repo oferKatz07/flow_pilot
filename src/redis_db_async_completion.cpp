@@ -57,6 +57,13 @@ StatusCodes status_code_from_string(const std::string& value)
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::enqueue_job_completion_async(const JobCompletionData& message)
 {
+    co_return co_await enqueue_job_completion_async(*default_connection_context_, message);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::enqueue_job_completion_async(
+    RedisConnectionContext& context,
+    const JobCompletionData& message)
+{
     const std::vector<std::string> keys{JOB_COMPLETION_STREAM_KEY};
     const std::vector<std::string> args{
         message.identity.client_id,
@@ -89,11 +96,18 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::enqueue_job_completion_async(co
     )lua";
 
     std::vector<std::string> values;
-    const auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, args, values);
+    const auto ok = co_await context.command_executor().execute_lua_script_async(lua_script, keys, args, values);
     co_return ok && values.size() == 1 && !values[0].empty();
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::dequeue_job_completion_async(JobCompletionData& message)
+{
+    co_return co_await dequeue_job_completion_async(*default_connection_context_, message);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::dequeue_job_completion_async(
+    RedisConnectionContext& context,
+    JobCompletionData& message)
 {
     const std::vector<std::string> keys{JOB_COMPLETION_STREAM_KEY};
     const std::string lua_script = R"lua(
@@ -115,7 +129,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::dequeue_job_completion_async(Jo
     )lua";
 
     std::vector<std::string> values;
-    const auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, {}, values);
+    const auto ok = co_await context.command_executor().execute_lua_script_async(lua_script, keys, {}, values);
     if (!ok) {
         co_return false;
     }

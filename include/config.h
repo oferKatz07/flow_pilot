@@ -44,6 +44,7 @@ struct InMemoryDBConfig {
     unsigned short port = 6379;
     std::string password;
     unsigned short key_retention_ttl = 900;
+    unsigned int queue_read_timeout_ms = 1000;
 };
 
 // set default values for the database configuration

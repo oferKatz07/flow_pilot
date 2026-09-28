@@ -5,6 +5,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <atomic>
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -54,6 +55,7 @@ private:
         const JobCompletionData& completion_data,
         const std::unordered_map<std::string, std::string>& workflow_fields);
 
+    std::unique_ptr<RedisConnectionContext> redis_context_;
     std::atomic<bool> running_{false};
     std::atomic<bool> main_loop_started_{false};
     bool main_loop_finished_{false};

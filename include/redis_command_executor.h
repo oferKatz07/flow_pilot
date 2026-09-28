@@ -3,6 +3,7 @@
 #pragma once
 
 #include <boost/asio/awaitable.hpp>
+#include <chrono>
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -56,7 +57,7 @@ public:
                                                                     std::string& member) const;
     boost::asio::awaitable<bool> execute_zset_blocking_dequeue_command_async(std::string key,
                                                                              std::string& member,
-                                                                             int timeout_seconds = 0) const;
+                                                                             std::chrono::milliseconds timeout = std::chrono::milliseconds(0)) const;
 
 private:
     ExecuteFunction execute_;

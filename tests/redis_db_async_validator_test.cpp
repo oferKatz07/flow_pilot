@@ -183,7 +183,7 @@ TEST(RedisCommandExecutorTest, ZsetBlockingDequeueBuildsBzpopmaxCommand)
         });
 
     std::string member;
-    ASSERT_TRUE(run_async(ioc, executor.execute_zset_blocking_dequeue_command_async("queue", member, 5)));
+    ASSERT_TRUE(run_async(ioc, executor.execute_zset_blocking_dequeue_command_async("queue", member, std::chrono::milliseconds(5000))));
 
     const std::vector<std::string> expected_args{"BZPOPMAX", "queue", "5"};
     EXPECT_EQ(observed_args, expected_args);

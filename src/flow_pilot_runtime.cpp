@@ -40,7 +40,7 @@ FlowPilotRuntime* FlowPilotRuntime::active_runtime()
 void FlowPilotRuntime::start()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (started_) {
+    if (started_ || shutting_down_) {
         return;
     }
 
@@ -107,7 +107,7 @@ void FlowPilotRuntime::shutdown()
 void FlowPilotRuntime::add_scheduler()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (shutting_down_) {
+    if (!started_ || shutting_down_) {
         return;
     }
     schedulers_.emplace_back(std::make_unique<scheduler>());
@@ -118,7 +118,7 @@ bool FlowPilotRuntime::remove_scheduler()
     std::unique_ptr<scheduler> removed_scheduler;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (schedulers_.empty()) {
+        if (!started_ || shutting_down_ || schedulers_.empty()) {
             return false;
         }
 
@@ -134,7 +134,7 @@ bool FlowPilotRuntime::remove_scheduler()
 void FlowPilotRuntime::add_completion_handler()
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (shutting_down_) {
+    if (!started_ || shutting_down_) {
         return;
     }
     completion_handlers_.emplace_back(std::make_unique<CompletionHandler>());
@@ -145,7 +145,7 @@ bool FlowPilotRuntime::remove_completion_handler()
     std::unique_ptr<CompletionHandler> removed_handler;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (completion_handlers_.empty()) {
+        if (!started_ || shutting_down_ || completion_handlers_.empty()) {
             return false;
         }
 

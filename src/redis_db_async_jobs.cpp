@@ -40,20 +40,35 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::update_job_runtime_async(
     const WorkflowIdentity& workflow_id,
     const std::string& job_id,
     const std::unordered_map<std::string, std::string>& fields) {
+    co_return co_await update_job_runtime_async(*default_connection_context_, workflow_id, job_id, fields);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::update_job_runtime_async(
+    RedisConnectionContext& context,
+    const WorkflowIdentity& workflow_id,
+    const std::string& job_id,
+    const std::unordered_map<std::string, std::string>& fields) {
     if (fields.empty()) {
         co_return true;
     }
 
     const auto job_key = RedisKeys::job_key(workflow_id, job_id);
-    co_return co_await command_executor_->execute_hset_command_async(job_key, fields);
+    co_return co_await context.command_executor().execute_hset_command_async(job_key, fields);
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
                                                                          const std::string& job_id,
                                                                          JobRuntimeData& job_data) const {
+    co_return co_await fetch_job_runtime_async(*default_connection_context_, workflow_id, job_id, job_data);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(RedisConnectionContext& context,
+                                                                         const WorkflowIdentity& workflow_id,
+                                                                         const std::string& job_id,
+                                                                         JobRuntimeData& job_data) const {
     std::unordered_map<std::string, std::string> job_fields;
     const auto job_key = RedisKeys::job_key(workflow_id, job_id);
-    if (!co_await command_executor_->execute_hgetall_command_async(job_key, job_fields)) {
+    if (!co_await context.command_executor().execute_hgetall_command_async(job_key, job_fields)) {
         Logger::get_logger()->error("fetch_job_runtime_async- Failed to fetched job {} fileds!!!", job_key);
         co_return false;
     }
@@ -72,6 +87,13 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(const W
 }
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(const WorkflowIdentity& workflow_id, 
+                                                                              const std::string& job_id, 
+                                                                              StartJobResult& result) {
+    co_return co_await try_set_job_to_running_async(*default_connection_context_, workflow_id, job_id, result);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(RedisConnectionContext& context,
+                                                                              const WorkflowIdentity& workflow_id, 
                                                                               const std::string& job_id, 
                                                                               StartJobResult& result) {
     const auto workflow_key = RedisKeys::workflow_key(workflow_id);
@@ -156,7 +178,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(co
     )lua";
 
     std::vector<std::string> values;
-    const auto ok = co_await command_executor_->execute_lua_script_async(lua_script, keys, args, values);
+    const auto ok = co_await context.command_executor().execute_lua_script_async(lua_script, keys, args, values);
     if (!ok || values.size() != 1) {
         result = StartJobResult::INTERNAL_ERROR;
         co_return false;
@@ -203,10 +225,18 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_payload_async(
     const WorkflowIdentity& workflow_id,
     const std::string& job_id,
     std::vector<uint8_t>& payload) const {
+    co_return co_await fetch_job_payload_async(*default_connection_context_, workflow_id, job_id, payload);
+}
+
+boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_payload_async(
+    RedisConnectionContext& context,
+    const WorkflowIdentity& workflow_id,
+    const std::string& job_id,
+    std::vector<uint8_t>& payload) const {
     const auto payload_key = RedisKeys::payload_key(workflow_id, job_id);
     std::vector<std::string> args{"GET", payload_key};
     std::string bulk_string_payload;
-    auto ok = co_await command_executor_->execute_bulk_string_command_async(args, bulk_string_payload);
+    auto ok = co_await context.command_executor().execute_bulk_string_command_async(args, bulk_string_payload);
     if (!ok) {
         payload.clear();
         co_return false;

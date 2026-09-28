@@ -90,7 +90,8 @@ void WorkerThread::run_worker_loop() {
 boost::asio::awaitable<bool> WorkerThread::update_job_status_to_running(const JobExeData& job_exe_data) {
     auto redis_db = RedisDatabaseAsync::get_instance();
     StartJobResult result;
-    if (!co_await redis_db->try_set_job_to_running_async(job_exe_data.identity, 
+    if (!co_await redis_db->try_set_job_to_running_async(redis_context(),
+                                                         job_exe_data.identity, 
                                                          job_exe_data.job_id, result)) {
         co_return false;
     }
@@ -112,6 +113,13 @@ boost::asio::awaitable<bool> WorkerThread::update_job_status_to_running(const Jo
         JobStatus::RUNNING);
 }
 
+RedisConnectionContext& WorkerThread::redis_context() {
+    if (!redis_context_) {
+        redis_context_ = std::make_unique<RedisConnectionContext>(RedisDatabaseAsync::get_instance()->io_context());
+    }
+    return *redis_context_;
+}
+
 bool WorkerThread::execute_job(const JobExeData& job_exe_data) {
     Logger::get_logger()->info("Executing job: {} for workflow: {}", 
                                job_exe_data.job_id, job_exe_data.identity.workflow_id);
@@ -121,16 +129,17 @@ bool WorkerThread::execute_job(const JobExeData& job_exe_data) {
 
 void WorkerThread::update_completion_handler(const JobCompletionData& completion_data) {
     auto redis_db = RedisDatabaseAsync::get_instance();
-    boost::asio::co_spawn(
+    auto completion_update = boost::asio::co_spawn(
         redis_db->io_context(),
-        [completion_data, redis_db]() -> boost::asio::awaitable<void> {
-            if (!co_await redis_db->enqueue_job_completion_async(completion_data)) {
+        [this, completion_data, redis_db]() -> boost::asio::awaitable<void> {
+            if (!co_await redis_db->enqueue_job_completion_async(redis_context(), completion_data)) {
                 Logger::get_logger()->error("Failed to enqueue completion message for job: {} in workflow: {}",
                                              completion_data.job_id, completion_data.identity.workflow_id);
             }
             co_return;
         },
-        boost::asio::detached);
+        boost::asio::use_future);
+    completion_update.get();
 }
 
 } // namespace flow_pilot

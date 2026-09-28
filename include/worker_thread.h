@@ -4,6 +4,7 @@
 #pragma once
 
 #include <boost/asio/awaitable.hpp>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -44,7 +45,10 @@ protected:
     virtual void update_completion_handler(const JobCompletionData& completion_data);
 
 private:
+    RedisConnectionContext& redis_context();
+
     IJobFetcher& job_fetcher_;
+    std::unique_ptr<RedisConnectionContext> redis_context_;
 };
 
 } // namespace flow_pilot

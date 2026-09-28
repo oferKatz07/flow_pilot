@@ -42,6 +42,7 @@ private:
 
     const std::string scheduler_uuid_;
     const std::string scheduler_redis_connection_id_;
+    std::unique_ptr<RedisConnectionContext> redis_context_;
     ThreadSafeBlockingQueue<JobExeData> worker_thread_queue_;
     std::vector<std::unique_ptr<WorkerThread>> workers_;
     std::vector<std::thread> worker_threads_;

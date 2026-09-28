@@ -80,7 +80,7 @@ int main(int argc, char* argv[])
         flow_pilot::Logger::get_logger()->info("Workflow service initialized with Redis at {}", redis_connection);
 
         // Initialize the persistent database (currently SQLite) based on configuration
-        auto& db = flow_pilot::DBFactory::get();
+        (void)flow_pilot::DBFactory::get();
         flow_pilot::Logger::get_logger()->info("Database initialized successfully at {}", sqlite_config.db_path);
 
         flow_pilot::FlowPilotRuntime runtime(
