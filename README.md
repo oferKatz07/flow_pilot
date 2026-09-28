@@ -188,6 +188,8 @@ The executable accepts these overrides:
 ./flow_pilot --redis-io-threads 2 --schedulers 2 --completion-handlers 2
 ```
 
+`--redis-io-threads` controls the number of threads running the Redis Asio I/O context; it does not by itself create independent Redis command connections. Schedulers and completion handlers can be added/removed while the runtime is active; Redis I/O thread count is currently a startup configuration.
+
 Each scheduler and completion handler can be stopped independently. Shutdown is idempotent, so `request_stop()` may be called by explicit runtime management code and again during destruction without double-stopping the same component.
 
 ## Runtime Status API
@@ -279,7 +281,9 @@ These policies are loaded during initialization and applied during workflow admi
 
 The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, DAG dependency validation, SQLite persistence, Redis runtime initialization, and initial execution-queue population.
 
-The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED -> RUNNING transitions, completion-handler processing, runtime-managed scheduler/completion-handler lifecycles, configurable Redis I/O/scheduler/completion-handler thread counts, clean shutdown tests, a runtime status API, and durable SQLite timestamps for READY/QUEUED/RUNNING lifecycle events. The next major implementation steps are deeper dependency advancement, retry handling, workflow finalization, and richer operational status/health data.
+The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED -> RUNNING transitions, a Redis Stream-based completion path, runtime-managed scheduler/completion-handler lifecycles, configurable Redis I/O/scheduler/completion-handler counts, dynamic scheduler/completion-handler add/remove, clean shutdown tests, a runtime status API, and durable SQLite lifecycle timestamps.
+
+The new multi-component runtime also exposes the next data-integrity work clearly. The ordinary Redis command connection must be serialized per request/reply transaction (or replaced by a connection pool) before multiple Redis I/O threads are considered fully safe. Completion-side read/modify/write updates must become atomic and idempotent before multiple completion handlers are considered data-integrity safe, and the current destructive stream dequeue should evolve to consumer-group acknowledgement/recovery semantics. These are active execution-engine tasks rather than completed guarantees.
 
 
 ### Current Project Status
@@ -320,7 +324,15 @@ The workflow execution subsystem is in progress. The current code supports Redis
 
 ✔ Completion-handler runtime loop foundation
 
+✔ Dynamic scheduler/completion-handler add/remove lifecycle
+
 ✔ READY/QUEUED/RUNNING lifecycle tests
+
+🚧 Serialize/pool ordinary Redis command connections for multi-I/O-thread safety
+
+🚧 Atomic/idempotent completion transitions for multi-handler safety
+
+🚧 Reliable completion acknowledgement/recovery (Redis Stream consumer groups)
 
 🚧 Scheduler recovery and health monitoring
 
@@ -360,6 +372,8 @@ The workflow execution subsystem is in progress. The current code supports Redis
 - Configurable Redis I/O, scheduler, and completion-handler counts
 - Runtime status API
 - Completion handling foundation
+- Multi-handler-safe atomic completion transitions (in progress)
+- Reliable completion acknowledgement/recovery (planned)
 - Dependency advancement
 - Retry handling
 - Scheduler-local health monitoring and recovery
@@ -373,6 +387,18 @@ The workflow execution subsystem is in progress. The current code supports Redis
 - Observability
 
 ---
+
+## Concurrency & Data-Integrity Focus
+
+FlowPilot now supports multiple process-local schedulers and completion handlers and can run the Redis Asio I/O context on multiple threads. The lifecycle management for those components is implemented, but safe lifecycle scaling is not the same as atomic workflow-state scaling. Current hardening work is focused on:
+
+* Serializing a complete Redis request/reply transaction per connection, or introducing a connection pool.
+* Moving completion counter/slot/state changes into atomic, idempotent Redis transitions.
+* Making completion delivery recoverable until processing succeeds.
+* Reclaiming QUEUED/RUNNING work owned by a failed scheduler.
+* Stress-testing invariants under simultaneous completions and runtime component churn.
+
+The core execution invariant is that workflow capacity is reserved before scheduler dispatch: `reserved_execution_slots` represents QUEUED and RUNNING jobs consuming workflow capacity. Redis is the active runtime authority; SQLite provides durable persisted state and recovery data.
 
 ## Building & Running Locally
 

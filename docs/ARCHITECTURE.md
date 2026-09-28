@@ -10,7 +10,7 @@ The admission subsystem validates incoming workflows, enforces client policies a
 
 The scheduler then operates on the prepared runtime state in Redis. During normal execution, the scheduler does not access SQLite. Redis contains the runtime state required to schedule and execute jobs, while SQLite provides durable persistence and the basis for recovery.
 
-The workflow admission phase is complete. The current execution architecture uses an explicit READY -> QUEUED -> RUNNING lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, runtime-owned scheduler and completion-handler components, configurable Redis I/O threads, and durable execution timestamps/statuses in SQLite. Current development is focused on completing execution semantics, recovery, and operational visibility.
+The workflow admission phase is complete. The current execution architecture uses an explicit READY -> QUEUED -> RUNNING -> COMPLETED/FAILED/CANCELED lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, runtime-owned scheduler and completion-handler components, configurable Redis I/O threads, and durable execution timestamps/statuses in SQLite. Current development is focused on completing execution semantics, recovery, and operational visibility.
 
 ---
 
@@ -109,6 +109,14 @@ Workflow admission and execution logic belong to dedicated services and runtime 
 FlowPilot owns its execution components through a runtime manager rather than ad hoc local variables in `main()`.
 
 The runtime manager is responsible for creating, stopping, and destroying Redis I/O threads, workflow schedulers, and completion handlers. This keeps shutdown ordering explicit and prepares the system for dynamic scaling, where schedulers and completion handlers can be added or removed while the process continues running.
+
+### 11. Concurrency Requires Atomic State Transitions
+
+FlowPilot may run multiple schedulers, completion handlers, worker threads, and Redis I/O threads in one process. Component lifecycle scaling and workflow-state correctness are separate concerns: adding execution components must not weaken Redis state-machine invariants.
+
+State changes that update several related Redis fields or structures should therefore be expressed as one atomic transition, preferably in Lua. In particular, completion processing must atomically validate the current job/workflow state, update job status, maintain workflow counters and `reserved_execution_slots`, and promote work when appropriate. This prevents lost updates when two jobs from the same workflow complete concurrently.
+
+A Redis connection is also a serialized request/reply channel. Multiple Asio threads do not by themselves make one shared connection safe for concurrent independent request/reply transactions. The normal Redis command path must therefore serialize complete transactions per connection or use a connection pool with per-connection serialization. Dedicated blocking scheduler/completion-wait connections remain separate from this command path.
 
 ---
 
@@ -301,6 +309,8 @@ The runtime is created by `main()` after configuration has been parsed. It start
 
 The runtime also exposes add/remove operations for schedulers and completion handlers. This supports the design intent that FlowPilot can eventually scale local scheduler and completion-handler capacity according to current load.
 
+Dynamic add/remove operations are accepted only while the runtime is started and not shutting down. Scheduler removal is graceful: the scheduler stops acquiring new Redis work, closes its local worker queue, and allows already handed-off local work to drain before destruction. Redis I/O thread count is configured at runtime startup; schedulers and completion handlers are the components currently designed for live add/remove.
+
 Shutdown is coordinated through the runtime. `request_stop()` on schedulers and completion handlers is idempotent, so components can be stopped explicitly by runtime management code and later destroyed safely. A scheduler or completion handler can be removed while other instances continue running.
 
 The runtime provides a process-local status snapshot used by the HTTP status API. The initial snapshot includes lifecycle flags and component counts; future snapshots can include scheduler UUIDs, Redis connection identifiers, thread IDs, queue depths, health information, and per-component statistics.
@@ -330,14 +340,14 @@ PENDING
    v
  RUNNING
    |
-   +------> SUCCESS
+   +------> COMPLETED
    |
    +------> FAILED
    |
    +------> CANCELED
 ```
 
-A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be running. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry is returned to READY when its retry delay has elapsed.
+A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be running. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry currently remains part of the RUNNING execution lifecycle while retry bookkeeping is recorded. Delayed retry requeueing is the next step of the retry implementation; no separate RETRYING state is used.
 
 ## Scheduler Responsibilities
 
@@ -353,11 +363,9 @@ The scheduler is responsible for:
 * Starting the execution-time budget when the worker fetches the job, rather than when the scheduler reserves it.
 * Monitoring dispatcher and worker-thread health.
 * Activating scheduler-local recovery when a worker thread becomes non-responsive.
-* Processing completion/failure events.
-* Advancing dependency state after successful completion.
-* Making newly eligible successor jobs READY.
-* Returning retry-eligible jobs to READY after their retry delay.
-* Completing or failing workflows according to their aggregate job state.
+* Handing worker completion/failure outcomes to the Redis completion stream.
+
+Dependency advancement, retry/finalization decisions, workflow counters, slot release, and workflow terminal-state decisions belong to the completion/retry side of the execution architecture rather than to the scheduler dispatch loop.
 
 The scheduler remains independent of the HTTP and workflow-admission layers.
 
@@ -398,7 +406,7 @@ reserved_execution_slots = QUEUED jobs + RUNNING jobs
 
 For a reclaimed job:
 
-* If the job can be retried, recovery clears stale worker ownership metadata, updates retry bookkeeping, and returns the job to READY or QUEUED according to retry delay and workflow capacity.
+* If the job can be retried, recovery clears stale worker ownership metadata and routes it through the retry path, which will return the job to an executable state according to retry delay and workflow capacity once delayed retry handling is complete.
 * If the job cannot be retried, recovery finalizes it as FAILED or CANCELED through the same completion/finalization path used by normal execution.
 * If the scheduler itself died, another scheduler or recovery coordinator reclaims the abandoned non-terminal jobs owned by the dead scheduler.
 
@@ -419,6 +427,10 @@ Their responsibilities include:
 * Driving workflow-level finalization when all jobs reach terminal states.
 
 Completion handlers are runtime-managed components, like schedulers. Multiple completion handlers may run in the same process, and each can be stopped independently. Completion-handler shutdown uses the same idempotent `request_stop()` pattern used by schedulers.
+
+The current completion transport uses a Redis Stream plus a notification channel. A worker appends a completion record and publishes a wake-up notification; a handler atomically takes the oldest stream entry using `XRANGE` + `XDEL` before processing it. This prevents two handlers from dequeuing the same stream entry, but it is currently **at-most-once after dequeue**: a handler/process failure after `XDEL` and before completion processing finishes can lose that event. The planned reliability improvement is a Redis Stream consumer group (`XREADGROUP`/pending entries/`XACK`) so completion records remain recoverable until processing succeeds.
+
+The current completion implementation is intentionally still under validation. Some workflow counters are calculated from a previously fetched workflow snapshot and then written back. With multiple completion handlers, two jobs from the same workflow can therefore race and lose a counter update. Before multi-handler execution is treated as data-integrity safe, these completion-side read/modify/write sequences should be consolidated into idempotent atomic Redis transitions. Duplicate/redelivered completion events must also become safe no-ops after the first valid terminal transition.
 
 ---
 
@@ -574,7 +586,7 @@ PENDING
    v
  RUNNING
    |
-   +------> SUCCESS
+   +------> COMPLETED
    |
    +------> FAILED
    |
@@ -587,7 +599,7 @@ The current job states are:
 * `READY` — dependencies are satisfied and the job is globally schedulable.
 * `QUEUED` — granted one of the workflow's execution slots and eligible for scheduler/worker dispatch.
 * `RUNNING` — fetched by a worker; execution timing starts here.
-* `SUCCESS` — completed successfully.
+* `COMPLETED` — completed successfully.
 * `FAILED` — execution failed with no further retry scheduled.
 * `CANCELED` — execution was canceled.
 
@@ -765,6 +777,8 @@ Redis operations are exposed through asynchronous APIs and integrated directly i
 
 Scheduler and completion-handler main loops run as asynchronous Redis-driven coroutines on the Redis I/O context. Blocking local worker execution remains outside the shared Redis I/O threads.
 
+`--redis-io-threads` controls how many threads run the Redis Asio `io_context`; it is execution concurrency, not a guarantee of independent Redis command connections. Connection-level request/reply serialization (or pooling) is required before the ordinary shared command path can safely exploit concurrent Redis I/O threads.
+
 ## SQLite
 
 SQLite is synchronous by nature.
@@ -794,6 +808,20 @@ The scheduler must therefore distinguish between:
 A job becoming QUEUED is not equivalent to it becoming RUNNING. QUEUED means the workflow has reserved capacity for the job; RUNNING means a worker has actually fetched it. Therefore `reserved_execution_slots = QUEUED jobs + RUNNING jobs`, and the execution timeout starts only at RUNNING.
 
 Each scheduler uses a bounded local worker queue and priority-ordered dispatch. Scheduler-local fairness mechanisms can be added without changing persisted job priority. Multiple scheduler instances may run in one process, and a scheduler can be stopped and removed while other schedulers continue consuming Redis runtime work.
+
+
+Important runtime invariants for concurrent execution are:
+
+```text
+reserved_execution_slots = QUEUED jobs + RUNNING jobs consuming workflow capacity
+
+A completion event changes terminal state/counters at most once
+
+A QUEUED job is either present in the global execution queue
+or is owned by a live scheduler that can progress/recover it
+```
+
+The last invariant is not yet fully recoverable across scheduler/process failure. Scheduler ownership (`owned_by`) provides the information required for later dead-scheduler reclamation, but the distributed recovery coordinator is still planned.
 
 ---
 
@@ -844,11 +872,25 @@ Implemented/refined:
 
 Current execution focus:
 
-1. Finish dependency advancement and successor promotion after completion.
-2. Integrate delayed retry handling.
-3. Complete/fail workflows from aggregate job state.
-4. Add scheduler-local worker health monitoring and recovery.
-5. Expand the runtime status API with component UUIDs, thread identifiers, queue depths, and health/statistics data.
+1. Make the ordinary Redis command path safe under multiple Redis I/O threads (transaction serialization or a connection pool).
+2. Consolidate completion-side job/workflow/counter updates into idempotent atomic Redis transitions.
+3. Replace destructive completion dequeue with consumer-group acknowledgement/recovery semantics.
+4. Complete delayed retry handling, dependency advancement, successor promotion, and workflow finalization.
+5. Add scheduler-local worker health monitoring, dead-owner recovery, and richer runtime status/metrics.
+6. Add concurrency stress/invariant tests, including simultaneous completions for one workflow and scheduler/completion-handler churn under load.
+
+## Concurrency and Integrity Test Strategy
+
+The multi-component runtime should be validated primarily through invariants rather than only single-operation unit tests. High-value regression/stress scenarios include:
+
+* Concurrent ordinary Redis commands with more than one Redis I/O thread.
+* Two completion handlers processing different jobs from the same workflow simultaneously.
+* Concurrent successful and terminal-failure completion for the same workflow.
+* Duplicate/redelivered completion events; counters and slots must change only once.
+* Scheduler removal after Redis dequeue but before/after local worker handoff.
+* Scheduler and completion-handler add/remove churn while many workflows execute.
+* End-of-run reconciliation of Redis counters, job states, execution-queue membership, and SQLite durable state.
+* ThreadSanitizer runs for lifecycle and concurrency tests, with AddressSanitizer/UBSan as complementary configurations.
 
 ## Phase 3 — Distributed Orchestration
 
