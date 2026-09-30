@@ -75,6 +75,7 @@ struct JobRuntimeData {
     int remaining_dependencies;
     int priority; // Currently not used
     int timeout_sec;
+    long long start_run_time = 0;
     int max_retries;
     int current_retry_count;
     int retry_delay_sec;
@@ -176,6 +177,19 @@ public:
     virtual boost::asio::awaitable<bool> update_workflow_runtime_async(
         const WorkflowIdentity& workflow_id,
         const std::unordered_map<std::string, std::string>& fields) = 0;
+    virtual boost::asio::awaitable<bool> increment_completed_jobs_and_complete_workflow_if_ready_async(
+        const WorkflowIdentity& workflow_id,
+        const std::string& last_update_time,
+        bool& workflow_completed) = 0;
+    virtual boost::asio::awaitable<bool> complete_failed_job_runtime_async(
+        const WorkflowIdentity& workflow_id,
+        const std::string& failed_job_id,
+        int updated_retry_count,
+        const std::vector<std::string>& workflow_job_ids,
+        const std::string& last_update_time,
+        std::vector<std::string>& canceled_job_ids,
+        bool& workflow_failed,
+        bool& workflow_completed) = 0;
     virtual boost::asio::awaitable<bool> fetch_workflow_runtime_async(const WorkflowIdentity& workflow_id,
                                                                       std::unordered_map<std::string, std::string>& workflow_data) const = 0;
     virtual boost::asio::awaitable<bool> create_workflow_waiting_ready_jobs(const WorkflowIdentity& workflow_id, 
@@ -268,6 +282,34 @@ public:
     boost::asio::awaitable<bool> update_workflow_runtime_async(RedisConnectionContext& context,
                                                                const WorkflowIdentity& workflow_id,
                                                                const std::unordered_map<std::string, std::string>& fields);
+    boost::asio::awaitable<bool> increment_completed_jobs_and_complete_workflow_if_ready_async(
+        const WorkflowIdentity& workflow_id,
+        const std::string& last_update_time,
+        bool& workflow_completed) override;
+    boost::asio::awaitable<bool> increment_completed_jobs_and_complete_workflow_if_ready_async(
+        RedisConnectionContext& context,
+        const WorkflowIdentity& workflow_id,
+        const std::string& last_update_time,
+        bool& workflow_completed);
+    boost::asio::awaitable<bool> complete_failed_job_runtime_async(
+        const WorkflowIdentity& workflow_id,
+        const std::string& failed_job_id,
+        int updated_retry_count,
+        const std::vector<std::string>& workflow_job_ids,
+        const std::string& last_update_time,
+        std::vector<std::string>& canceled_job_ids,
+        bool& workflow_failed,
+        bool& workflow_completed) override;
+    boost::asio::awaitable<bool> complete_failed_job_runtime_async(
+        RedisConnectionContext& context,
+        const WorkflowIdentity& workflow_id,
+        const std::string& failed_job_id,
+        int updated_retry_count,
+        const std::vector<std::string>& workflow_job_ids,
+        const std::string& last_update_time,
+        std::vector<std::string>& canceled_job_ids,
+        bool& workflow_failed,
+        bool& workflow_completed);
     boost::asio::awaitable<bool> fetch_workflow_runtime_async(const WorkflowIdentity& workflow_id,
                                                               std::unordered_map<std::string, std::string>& workflow_data) const override;
     boost::asio::awaitable<bool> fetch_workflow_runtime_async(RedisConnectionContext& context,

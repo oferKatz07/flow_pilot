@@ -78,6 +78,11 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(RedisCo
     job_data.remaining_dependencies = std::stoi(job_fields["remaining_dependencies"]);
     job_data.priority = std::stoi(job_fields["priority"]);
     job_data.timeout_sec = std::stoi(job_fields["timeout_sec"]);
+    try {
+        job_data.start_run_time = std::stoll(job_fields["start_run_time"]);
+    } catch (...) {
+        job_data.start_run_time = 0;
+    }
     job_data.max_retries = std::stoi(job_fields["max_retries"]);
     job_data.current_retry_count = std::stoi(job_fields["current_retry_count"]);
     job_data.retry_delay_sec = std::stoi(job_fields["retry_delay_sec"]);

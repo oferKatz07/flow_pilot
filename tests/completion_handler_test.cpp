@@ -46,6 +46,16 @@ void clear_completion_stream(boost::asio::io_context& ioc, RedisDatabaseAsync& r
     ASSERT_TRUE(run_async(ioc, redis.command_executor().execute_integer_command_async(delete_args, deleted)));
 }
 
+bool redis_key_exists(boost::asio::io_context& ioc, RedisDatabaseAsync& redis, const std::string& key)
+{
+    long long exists = 0;
+    if (!run_async(ioc, redis.command_executor().execute_integer_command_async({"EXISTS", key}, exists))) {
+        return false;
+    }
+
+    return exists > 0;
+}
+
 WorkflowData make_sqlite_workflow(const WorkflowIdentity& identity,
                                   const std::string& request_id,
                                   WorkflowStatus status,
@@ -186,13 +196,22 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobUpdatesRedisAndSqlite)
     const std::string job_id = "job-" + generate_unique_id();
 
     persist_sqlite_workflow(ioc_, identity, {{job_id, JobStatus::RUNNING}});
+    auto redis_job = make_redis_job(job_id, JobStatus::RUNNING);
+    redis_job.successors.push_back("successor-" + generate_unique_id());
     auto runtime = make_redis_runtime(
         identity,
         WorkflowStatus::RUNNING,
         1,
         1,
-        {make_redis_job(job_id, JobStatus::RUNNING)});
+        {redis_job});
     ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+    ASSERT_TRUE(run_async(ioc_, redis_->set_job_payload_async(identity, job_id, {1, 2, 3})));
+    const std::string active_workflows_key = "fp:active:" + identity.client_id + ":workflows";
+    long long active_added = 0;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"SADD", active_workflows_key, identity.workflow_id},
+        active_added)));
+    ASSERT_EQ(active_added, 1);
 
     JobCompletionData completion;
     completion.identity = identity;
@@ -202,15 +221,12 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobUpdatesRedisAndSqlite)
 
     ASSERT_TRUE(run_async(ioc_, handler.process_completed_jobs(completion)));
 
-    JobRuntimeData redis_job;
-    ASSERT_TRUE(run_async(ioc_, redis_->fetch_job_runtime_async(identity, job_id, redis_job)));
-    EXPECT_EQ(redis_job.status, to_string(JobStatus::COMPLETED));
-
-    std::unordered_map<std::string, std::string> workflow_fields;
-    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(identity, workflow_fields)));
-    EXPECT_EQ(workflow_fields["completed_jobs"], "1");
-    EXPECT_EQ(workflow_fields["reserved_execution_slots"], "0");
-    EXPECT_EQ(workflow_fields["status"], to_string(WorkflowStatus::COMPLETED));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::workflow_key(identity)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::job_key(identity, job_id)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::successors_key(identity, job_id)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::payload_key(identity, job_id)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::workflow_waiting_jobs_key(identity)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, active_workflows_key));
 
     std::vector<WorkflowJob> sqlite_jobs;
     ASSERT_TRUE(run_async(ioc_, DBFactory::get().get_all_jobs_for_workflow_async(
@@ -240,6 +256,62 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobReturnsFalseWhenWorkflowRuntime
     EXPECT_FALSE(run_async(ioc_, handler.process_completed_jobs(completion)));
 }
 
+TEST_F(CompletionHandlerTest, ProcessFailedJobDoesNotRetryWhenJobRuntimeExpired)
+{
+    CompletionHandler handler(false);
+    const WorkflowIdentity identity{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string failed_job_id = "failed-job-" + generate_unique_id();
+
+    persist_sqlite_workflow(ioc_, identity, {{failed_job_id, JobStatus::RUNNING}});
+
+    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 30, 3, 0);
+    failed_job.timeout_sec = 1;
+    auto runtime = make_redis_runtime(
+        identity,
+        WorkflowStatus::RUNNING,
+        1,
+        1,
+        {failed_job});
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+    ASSERT_TRUE(run_async(ioc_, redis_->update_job_runtime_async(
+        identity,
+        failed_job_id,
+        {{"start_run_time", "1"}})));
+    const std::string active_workflows_key = "fp:active:" + identity.client_id + ":workflows";
+    long long active_added = 0;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"SADD", active_workflows_key, identity.workflow_id},
+        active_added)));
+    ASSERT_EQ(active_added, 1);
+
+    JobCompletionData completion;
+    completion.identity = identity;
+    completion.job_id = failed_job_id;
+    completion.status = JobStatus::FAILED;
+    completion.error_code = StatusCodes::JOB_EXECUTION_FAILURE;
+
+    ASSERT_TRUE(run_async(ioc_, handler.process_completed_jobs(completion)));
+
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::workflow_key(identity)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::job_key(identity, failed_job_id)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, active_workflows_key));
+
+    std::vector<WorkflowData> sqlite_workflows;
+    ASSERT_TRUE(run_async(ioc_, DBFactory::get().get_all_workflows_for_client_async(
+        identity.client_id,
+        sqlite_workflows)));
+    ASSERT_EQ(sqlite_workflows.size(), 1u);
+    EXPECT_EQ(sqlite_workflows[0].status, WorkflowStatus::FAILED);
+
+    std::vector<WorkflowJob> sqlite_jobs;
+    ASSERT_TRUE(run_async(ioc_, DBFactory::get().get_all_jobs_for_workflow_async(
+        identity.client_id,
+        identity.workflow_id,
+        sqlite_jobs)));
+    ASSERT_EQ(sqlite_jobs.size(), 1u);
+    EXPECT_EQ(sqlite_jobs[0].status, JobStatus::FAILED);
+}
+
 TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndCancelsWaitingJobs)
 {
     CompletionHandler handler(false);
@@ -264,6 +336,12 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndC
     ASSERT_TRUE(run_async(ioc_, redis_->enqueue_job_for_execution_async(
         identity,
         PrioritizedJob{waiting_job_id, waiting_job.job_uuid, waiting_job.priority})));
+    const std::string active_workflows_key = "fp:active:" + identity.client_id + ":workflows";
+    long long active_added = 0;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"SADD", active_workflows_key, identity.workflow_id},
+        active_added)));
+    ASSERT_EQ(active_added, 1);
 
     JobCompletionData completion;
     completion.identity = identity;
@@ -273,20 +351,10 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndC
 
     ASSERT_TRUE(run_async(ioc_, handler.process_completed_jobs(completion)));
 
-    JobRuntimeData redis_failed_job;
-    ASSERT_TRUE(run_async(ioc_, redis_->fetch_job_runtime_async(identity, failed_job_id, redis_failed_job)));
-    EXPECT_EQ(redis_failed_job.status, to_string(JobStatus::FAILED));
-    EXPECT_EQ(redis_failed_job.current_retry_count, 1);
-
-    JobRuntimeData redis_waiting_job;
-    ASSERT_TRUE(run_async(ioc_, redis_->fetch_job_runtime_async(identity, waiting_job_id, redis_waiting_job)));
-    EXPECT_EQ(redis_waiting_job.status, to_string(JobStatus::CANCELED));
-
-    std::unordered_map<std::string, std::string> workflow_fields;
-    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(identity, workflow_fields)));
-    EXPECT_EQ(workflow_fields["status"], to_string(WorkflowStatus::FAILED));
-    EXPECT_EQ(workflow_fields["failed_jobs"], "1");
-    EXPECT_EQ(workflow_fields["reserved_execution_slots"], "0");
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::workflow_key(identity)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::job_key(identity, failed_job_id)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, RedisKeys::job_key(identity, waiting_job_id)));
+    EXPECT_FALSE(redis_key_exists(ioc_, *redis_, active_workflows_key));
 
     long long queue_size = -1;
     ASSERT_TRUE(run_async(ioc_, redis_->get_execution_queue_size_async(queue_size)));
@@ -308,6 +376,8 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndC
     for (const auto& job : sqlite_jobs) {
         if (job.job_id == failed_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
+        } else if (job.job_id == waiting_job_id) {
+            EXPECT_EQ(job.status, JobStatus::CANCELED);
         }
     }
 }

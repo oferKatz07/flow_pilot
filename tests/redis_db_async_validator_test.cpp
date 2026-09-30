@@ -934,6 +934,100 @@ TEST_F(RedisDatabaseAsyncValidatorTest, CreateWorkflowRuntimeDataRollsBackWhenWa
     ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(del_args, deleted)));
 }
 
+TEST_F(RedisDatabaseAsyncValidatorTest, IncrementCompletedJobsCompletesRunningWorkflowOnFinalJob)
+{
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::RUNNING, JobStatus::RUNNING);
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    bool workflow_completed = false;
+    ASSERT_TRUE(run_async(ioc_, redis_->increment_completed_jobs_and_complete_workflow_if_ready_async(
+        workflow_id,
+        "12345",
+        workflow_completed)));
+    EXPECT_TRUE(workflow_completed);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["completed_jobs"], "1");
+    EXPECT_EQ(workflow_fields["last_update_time"], "12345");
+    EXPECT_EQ(workflow_fields["status"], std::string(to_string(WorkflowStatus::COMPLETED)));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, IncrementCompletedJobsPreservesNonRunningWorkflowStatus)
+{
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::FAILED, JobStatus::RUNNING);
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    bool workflow_completed = true;
+    ASSERT_TRUE(run_async(ioc_, redis_->increment_completed_jobs_and_complete_workflow_if_ready_async(
+        workflow_id,
+        "12346",
+        workflow_completed)));
+    EXPECT_FALSE(workflow_completed);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["completed_jobs"], "1");
+    EXPECT_EQ(workflow_fields["last_update_time"], "12346");
+    EXPECT_EQ(workflow_fields["status"], std::string(to_string(WorkflowStatus::FAILED)));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, IncrementCompletedJobsFailsRunningWorkflowWhenRuntimeExceeded)
+{
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::RUNNING, JobStatus::RUNNING);
+    runtime.workflow.total_jobs = 2;
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+    ASSERT_TRUE(run_async(ioc_, redis_->update_workflow_runtime_async(
+        workflow_id,
+        {{"start_run_time", "1"}, {"max_run_time", "1"}})));
+
+    bool workflow_completed = true;
+    EXPECT_FALSE(run_async(ioc_, redis_->increment_completed_jobs_and_complete_workflow_if_ready_async(
+        workflow_id,
+        "12347",
+        workflow_completed)));
+    EXPECT_FALSE(workflow_completed);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["completed_jobs"], "1");
+    EXPECT_EQ(workflow_fields["status"], std::string(to_string(WorkflowStatus::FAILED)));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, IncrementCompletedJobsIgnoresExceededRuntimeWhenWorkflowIsNotRunning)
+{
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::FAILED, JobStatus::RUNNING);
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+    ASSERT_TRUE(run_async(ioc_, redis_->update_workflow_runtime_async(
+        workflow_id,
+        {{"start_run_time", "1"}, {"max_run_time", "1"}})));
+
+    bool workflow_completed = true;
+    EXPECT_TRUE(run_async(ioc_, redis_->increment_completed_jobs_and_complete_workflow_if_ready_async(
+        workflow_id,
+        "12348",
+        workflow_completed)));
+    EXPECT_FALSE(workflow_completed);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["completed_jobs"], "1");
+    EXPECT_EQ(workflow_fields["last_update_time"], "12348");
+    EXPECT_EQ(workflow_fields["status"], std::string(to_string(WorkflowStatus::FAILED)));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
 TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningStartsReadyWorkflow)
 {
     const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};

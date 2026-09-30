@@ -54,6 +54,8 @@ private:
     boost::asio::awaitable<bool> handle_job_canceled(
         const JobCompletionData& completion_data,
         const std::unordered_map<std::string, std::string>& workflow_fields);
+    boost::asio::awaitable<bool> cleanup_completed_workflow_redis_entries(
+        const WorkflowIdentity& identity);
 
     std::unique_ptr<RedisConnectionContext> redis_context_;
     std::atomic<bool> running_{false};

@@ -1,10 +1,10 @@
 #include <gtest/gtest.h>
 
-#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
-#include <boost/asio/use_future.hpp>
 
 #include <atomic>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -37,7 +37,17 @@ class CountingWorkerThread : public WorkerThread {
 public:
     explicit CountingWorkerThread(IJobFetcher& job_fetcher, bool start_transition_succeeds = true)
         : WorkerThread(job_fetcher),
-          start_transition_succeeds_(start_transition_succeeds) {}
+          start_transition_succeeds_(start_transition_succeeds),
+          work_guard_(boost::asio::make_work_guard(ioc_)),
+          io_thread_([this]() { ioc_.run(); }) {}
+
+    ~CountingWorkerThread() override {
+        work_guard_.reset();
+        ioc_.stop();
+        if (io_thread_.joinable()) {
+            io_thread_.join();
+        }
+    }
 
     int executed_jobs() const {
         return executed_jobs_.load();
@@ -59,17 +69,21 @@ protected:
         completed_jobs_.fetch_add(1);
     }
 
+    boost::asio::io_context& redis_io_context() override {
+        return ioc_;
+    }
+
 private:
     std::atomic<int> executed_jobs_{0};
     std::atomic<int> completed_jobs_{0};
     bool start_transition_succeeds_;
+    boost::asio::io_context ioc_;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_guard_;
+    std::thread io_thread_;
 };
 
 void run_worker_loop(WorkerThread& worker) {
-    boost::asio::io_context ioc;
-    auto future = boost::asio::co_spawn(ioc, worker.main_worker_loop(), boost::asio::use_future);
-    ioc.run();
-    future.get();
+    worker.run_worker_loop();
 }
 
 } // namespace
