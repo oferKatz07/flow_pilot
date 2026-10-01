@@ -567,11 +567,11 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueWaitsUntilExecutionQueueR
     PrioritizedJob ready_job{job_id, gen(), 17};
     WorkflowIdentity dequeued_identity;
     std::string dequeued_job_id;
-    ASSERT_TRUE(redis_->register_scheduler("scheduler-waiting"));
+    RedisConnectionContext dequeue_context(redis_->io_context());
 
     auto wait_future = boost::asio::co_spawn(
         ioc_,
-        redis_->blocking_dequeue_job_for_execution_async(dequeued_identity, dequeued_job_id, "scheduler-waiting"),
+        redis_->blocking_dequeue_job_for_execution_async(dequeue_context, dequeued_identity, dequeued_job_id, "scheduler-waiting"),
         boost::asio::use_future);
     boost::asio::co_spawn(
         ioc_,
@@ -588,12 +588,12 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueWaitsUntilExecutionQueueR
     std::unordered_map<std::string, std::string> fields;
     ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(RedisKeys::job_key(workflow_id, job_id), fields)));
     EXPECT_EQ(fields["owned_by"], "scheduler-waiting");
+    EXPECT_EQ(fields["status"], std::string(to_string(JobStatus::PENDING_EXECUTION)));
 
     long long queue_size = 0;
     ASSERT_TRUE(run_async(ioc_, redis_->get_execution_queue_size_async(queue_size)));
     EXPECT_EQ(queue_size, 0);
 
-    redis_->deregister_scheduler("scheduler-waiting");
     ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {job_data})));
 }
 
@@ -616,16 +616,16 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueSupportsMultipleScheduler
     WorkflowIdentity second_identity;
     std::string first_dequeued_job;
     std::string second_dequeued_job;
-    ASSERT_TRUE(redis_->register_scheduler("scheduler-one"));
-    ASSERT_TRUE(redis_->register_scheduler("scheduler-two"));
+    RedisConnectionContext first_dequeue_context(redis_->io_context());
+    RedisConnectionContext second_dequeue_context(redis_->io_context());
 
     auto first_waiter = boost::asio::co_spawn(
         ioc_,
-        redis_->blocking_dequeue_job_for_execution_async(first_identity, first_dequeued_job, "scheduler-one"),
+        redis_->blocking_dequeue_job_for_execution_async(first_dequeue_context, first_identity, first_dequeued_job, "scheduler-one"),
         boost::asio::use_future);
     auto second_waiter = boost::asio::co_spawn(
         ioc_,
-        redis_->blocking_dequeue_job_for_execution_async(second_identity, second_dequeued_job, "scheduler-two"),
+        redis_->blocking_dequeue_job_for_execution_async(second_dequeue_context, second_identity, second_dequeued_job, "scheduler-two"),
         boost::asio::use_future);
     boost::asio::co_spawn(
         ioc_,
@@ -647,8 +647,6 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueSupportsMultipleScheduler
     ASSERT_TRUE(run_async(ioc_, redis_->get_execution_queue_size_async(queue_size)));
     EXPECT_EQ(queue_size, 0);
 
-    redis_->deregister_scheduler("scheduler-one");
-    redis_->deregister_scheduler("scheduler-two");
     ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {first_job_data, second_job_data})));
 }
 
@@ -667,10 +665,10 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueReturnsImmediatelyWhenQue
 
     WorkflowIdentity dequeued_identity;
     std::string dequeued_job_id;
-    ASSERT_TRUE(redis_->register_scheduler("scheduler-existing-work"));
+    RedisConnectionContext dequeue_context(redis_->io_context());
     auto wait_future = boost::asio::co_spawn(
         ioc_,
-        redis_->blocking_dequeue_job_for_execution_async(dequeued_identity, dequeued_job_id, "scheduler-existing-work"),
+        redis_->blocking_dequeue_job_for_execution_async(dequeue_context, dequeued_identity, dequeued_job_id, "scheduler-existing-work"),
         boost::asio::use_future);
 
     ASSERT_TRUE(run_until_future_ready(ioc_, wait_future, std::chrono::seconds(2)));
@@ -680,7 +678,6 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueReturnsImmediatelyWhenQue
     EXPECT_EQ(dequeued_identity.workflow_id, workflow_id.workflow_id);
     EXPECT_EQ(dequeued_job_id, job_id);
 
-    redis_->deregister_scheduler("scheduler-existing-work");
     ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {job_data})));
 }
 
@@ -703,11 +700,11 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueSkipsInvalidEntriesUntilV
     PrioritizedJob ready_job{job_id, gen(), 23};
     WorkflowIdentity dequeued_identity;
     std::string dequeued_job_id;
-    ASSERT_TRUE(redis_->register_scheduler("scheduler-skip-invalid"));
+    RedisConnectionContext dequeue_context(redis_->io_context());
 
     auto wait_future = boost::asio::co_spawn(
         ioc_,
-        redis_->blocking_dequeue_job_for_execution_async(dequeued_identity, dequeued_job_id, "scheduler-skip-invalid"),
+        redis_->blocking_dequeue_job_for_execution_async(dequeue_context, dequeued_identity, dequeued_job_id, "scheduler-skip-invalid"),
         boost::asio::use_future);
     boost::asio::co_spawn(
         ioc_,
@@ -721,22 +718,23 @@ TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueSkipsInvalidEntriesUntilV
     EXPECT_EQ(dequeued_identity.workflow_id, workflow_id.workflow_id);
     EXPECT_EQ(dequeued_job_id, job_id);
 
-    redis_->deregister_scheduler("scheduler-skip-invalid");
     ASSERT_TRUE(run_async(ioc_, redis_->delete_all_workflow_jobs_async(workflow_id, {job_data})));
 }
 
-TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueFailsForUnregisteredScheduler)
+TEST_F(RedisDatabaseAsyncValidatorTest, BlockingDequeueFailsForEmptySchedulerId)
 {
     run_async(ioc_, redis_->clear_execution_queue_async());
 
     WorkflowIdentity dequeued_identity;
     std::string dequeued_job_id;
+    RedisConnectionContext dequeue_context(redis_->io_context());
 
     EXPECT_FALSE(run_async(ioc_,
                            redis_->blocking_dequeue_job_for_execution_async(
+                               dequeue_context,
                                dequeued_identity,
                                dequeued_job_id,
-                               "scheduler-not-registered-" + generate_unique_id())));
+                               "")));
 }
 
 TEST_F(RedisDatabaseAsyncValidatorTest, SchedulerWithSingleWorkerDequeuesReadyJobAndStopsCleanly)
@@ -1028,10 +1026,63 @@ TEST_F(RedisDatabaseAsyncValidatorTest, IncrementCompletedJobsIgnoresExceededRun
     ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
 }
 
+TEST_F(RedisDatabaseAsyncValidatorTest, CompleteFailedJobRuntimeSkipsPendingExecutionJobs)
+{
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+
+    WorkflowRuntimeInfo runtime;
+    runtime.identity = workflow_id;
+    runtime.workflow.workflow_id = workflow_id.workflow_id;
+    runtime.workflow.status = to_string(WorkflowStatus::RUNNING);
+    runtime.workflow.max_concurrent_jobs = 3;
+    runtime.workflow.reserved_execution_slots = 3;
+    runtime.workflow.max_runtime_sec = 60;
+    runtime.workflow.total_jobs = 3;
+    runtime.workflow.pending_jobs = 0;
+    runtime.workflow.completed_jobs = 0;
+    runtime.workflow.failed_jobs = 0;
+    runtime.jobs = {
+        make_job_runtime("failed", JobStatus::RUNNING, 0, 40),
+        make_job_runtime("pending-execution", JobStatus::PENDING_EXECUTION, 0, 20),
+        make_job_runtime("queued-open", JobStatus::QUEUED, 0, 10)
+    };
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    std::vector<std::string> canceled_job_ids;
+    bool workflow_failed = false;
+    bool workflow_completed = true;
+    ASSERT_TRUE(run_async(ioc_, redis_->complete_failed_job_runtime_async(
+        workflow_id,
+        "failed",
+        1,
+        {"failed", "pending-execution", "queued-open"},
+        canceled_job_ids,
+        workflow_failed,
+        workflow_completed)));
+
+    ASSERT_EQ(canceled_job_ids, std::vector<std::string>{"queued-open"});
+    EXPECT_TRUE(workflow_failed);
+    EXPECT_FALSE(workflow_completed);
+
+    std::unordered_map<std::string, std::string> pending_execution_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(workflow_id, "pending-execution"),
+        pending_execution_fields)));
+    EXPECT_EQ(pending_execution_fields["status"], std::string(to_string(JobStatus::PENDING_EXECUTION)));
+
+    std::unordered_map<std::string, std::string> queued_open_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(workflow_id, "queued-open"),
+        queued_open_fields)));
+    EXPECT_EQ(queued_open_fields["status"], std::string(to_string(JobStatus::CANCELED)));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
 TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningStartsReadyWorkflow)
 {
     const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
-    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::QUEUED);
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::PENDING_EXECUTION);
     ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
 
     StartJobResult result = StartJobResult::INTERNAL_ERROR;
@@ -1055,7 +1106,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningStartsReadyWorkflow)
 TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningRejectsReadyWorkflowWithExistingStartTime)
 {
     const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
-    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::QUEUED);
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::PENDING_EXECUTION);
     ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
     ASSERT_TRUE(run_async(ioc_, redis_->update_workflow_runtime_async(workflow_id, {{"start_run_time", "123"}})));
 
@@ -1071,10 +1122,10 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningRejectsReadyWorkflowWi
     ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
 }
 
-TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningCancelsQueuedJobWhenWorkflowIsTerminal)
+TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningCancelsPendingExecutionJobWhenWorkflowIsTerminal)
 {
     const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
-    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::FAILED, JobStatus::QUEUED);
+    auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::FAILED, JobStatus::PENDING_EXECUTION);
     ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
 
     StartJobResult result = StartJobResult::INTERNAL_ERROR;
@@ -1118,6 +1169,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningRejectsInvalidJobStatu
     const std::vector<StatusCase> cases{
         {"PENDING", std::string(to_string(JobStatus::PENDING)), true},
         {"READY", std::string(to_string(JobStatus::READY)), true},
+        {"QUEUED", std::string(to_string(JobStatus::QUEUED)), true},
         {"RUNNING", std::string(to_string(JobStatus::RUNNING)), true},
         {"COMPLETED", std::string(to_string(JobStatus::COMPLETED)), true},
         {"FAILED", std::string(to_string(JobStatus::FAILED)), true},
@@ -1129,7 +1181,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningRejectsInvalidJobStatu
         SCOPED_TRACE("job=" + job_case.name);
 
         const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
-        auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::QUEUED);
+        auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::PENDING_EXECUTION);
         ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
 
         const auto workflow_key = RedisKeys::workflow_key(workflow_id);
@@ -1168,7 +1220,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningRejectsInvalidJobStatu
     }
 }
 
-TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningCancelsQueuedJobForInvalidWorkflowStatusesAndFailsWorkflow)
+TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningCancelsPendingExecutionJobForInvalidWorkflowStatusesAndFailsWorkflow)
 {
     struct StatusCase {
         std::string name;
@@ -1187,7 +1239,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningCancelsQueuedJobForInv
         SCOPED_TRACE("workflow=" + workflow_case.name);
 
         const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
-        auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::QUEUED);
+        auto runtime = make_single_job_runtime(workflow_id, WorkflowStatus::READY, JobStatus::PENDING_EXECUTION);
         ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
 
         const auto workflow_key = RedisKeys::workflow_key(workflow_id);
@@ -1221,7 +1273,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningCancelsQueuedJobForInv
     }
 }
 
-TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningHandlesQueuedJobWorkflowStateCases)
+TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningHandlesPendingExecutionJobWorkflowStateCases)
 {
     struct StatusCase {
         std::string name;
@@ -1243,7 +1295,7 @@ TEST_F(RedisDatabaseAsyncValidatorTest, TrySetJobToRunningHandlesQueuedJobWorkfl
         SCOPED_TRACE("workflow=" + workflow_case.name);
 
         const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
-        auto runtime = make_single_job_runtime(workflow_id, workflow_case.workflow_status, JobStatus::QUEUED);
+        auto runtime = make_single_job_runtime(workflow_id, workflow_case.workflow_status, JobStatus::PENDING_EXECUTION);
         ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
 
         StartJobResult result = StartJobResult::INTERNAL_ERROR;

@@ -141,8 +141,6 @@ public:
     virtual ~IRedisDatabaseAsync() = default;
 
     virtual bool connect(const std::string& connection_string, const std::string& password = {}) = 0;
-    virtual bool register_scheduler(const std::string& scheduler_id) = 0;
-    virtual void deregister_scheduler(const std::string& scheduler_id) = 0;
     
     virtual boost::asio::awaitable<bool> request_exists_async(const std::string& client_id, 
                                                               const std::string& request_id) const = 0;
@@ -186,7 +184,6 @@ public:
         const std::string& failed_job_id,
         int updated_retry_count,
         const std::vector<std::string>& workflow_job_ids,
-        const std::string& last_update_time,
         std::vector<std::string>& canceled_job_ids,
         bool& workflow_failed,
         bool& workflow_completed) = 0;
@@ -204,7 +201,8 @@ public:
                                                                                 const PrioritizedJobsList& queued_jobs) = 0;
     virtual boost::asio::awaitable<bool> enqueue_job_for_execution_async(const WorkflowIdentity& workflow_id, 
                                                                          const PrioritizedJob& ready_job) = 0;
-    virtual boost::asio::awaitable<bool> blocking_dequeue_job_for_execution_async(WorkflowIdentity& workflow_id,
+    virtual boost::asio::awaitable<bool> blocking_dequeue_job_for_execution_async(RedisConnectionContext& context,
+                                                                                  WorkflowIdentity& workflow_id,
                                                                                   std::string& ready_job,
                                                                                   std::string scheduler_id) = 0;
     virtual boost::asio::awaitable<void> wait_for_ready_job_event_async(std::string scheduler_id) = 0;
@@ -252,8 +250,6 @@ public:
     RedisDatabaseAsync& operator=(RedisDatabaseAsync&&) = delete;
     
     bool connect(const std::string& connection_string, const std::string& password = {}) override;
-    bool register_scheduler(const std::string& scheduler_id) override;
-    void deregister_scheduler(const std::string& scheduler_id) override;
     boost::asio::awaitable<bool> request_exists_async(const std::string& client_id, const std::string& request_id) const override;
     boost::asio::awaitable<bool> reserve_request_id_async(const std::string& client_id, const std::string& request_id) override;
     boost::asio::awaitable<bool> release_request_id_async(const std::string& client_id, const std::string& request_id) override;
@@ -296,7 +292,6 @@ public:
         const std::string& failed_job_id,
         int updated_retry_count,
         const std::vector<std::string>& workflow_job_ids,
-        const std::string& last_update_time,
         std::vector<std::string>& canceled_job_ids,
         bool& workflow_failed,
         bool& workflow_completed) override;
@@ -306,7 +301,6 @@ public:
         const std::string& failed_job_id,
         int updated_retry_count,
         const std::vector<std::string>& workflow_job_ids,
-        const std::string& last_update_time,
         std::vector<std::string>& canceled_job_ids,
         bool& workflow_failed,
         bool& workflow_completed);
@@ -336,13 +330,10 @@ public:
                                                                         const PrioritizedJobsList& queued_jobs);
     boost::asio::awaitable<bool> enqueue_job_for_execution_async(const WorkflowIdentity& workflow_id, 
                                                                  const PrioritizedJob& ready_job) override;
-    boost::asio::awaitable<bool> blocking_dequeue_job_for_execution_async(WorkflowIdentity& workflow_id,
-                                                                          std::string& ready_job,
-                                                                          std::string scheduler_id) override;
     boost::asio::awaitable<bool> blocking_dequeue_job_for_execution_async(RedisConnectionContext& context,
                                                                           WorkflowIdentity& workflow_id,
                                                                           std::string& ready_job,
-                                                                          const std::string& scheduler_id);
+                                                                          std::string scheduler_id) override;
     boost::asio::awaitable<void> wait_for_ready_job_event_async(std::string scheduler_id) override;
     boost::asio::awaitable<bool> get_execution_queue_size_async(long long& size) const override;
     boost::asio::awaitable<void> clear_execution_queue_async() override;
@@ -405,9 +396,6 @@ private:
     std::unique_ptr<RedisConnectionContext> default_connection_context_;
     RedisCommandExecutor* command_executor_;
     std::chrono::milliseconds queue_read_timeout_;
-    std::mutex scheduler_clients_mutex_;
-    std::unordered_map<std::string, std::shared_ptr<ImplAsync>> scheduler_blocking_clients_;
-
     static std::shared_ptr<RedisDatabaseAsync> instance_;
     static std::once_flag init_flag_;
 };

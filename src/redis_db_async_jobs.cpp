@@ -109,7 +109,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(Re
         std::string(to_string(WorkflowStatus::RUNNING)),
         std::string(to_string(WorkflowStatus::FAILED)),
         std::string(to_string(WorkflowStatus::CANCELED)),
-        std::string(to_string(JobStatus::QUEUED)),
+        std::string(to_string(JobStatus::PENDING_EXECUTION)),
         std::string(to_string(JobStatus::RUNNING)),
         std::string(to_string(JobStatus::CANCELED))
     };
@@ -122,7 +122,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(Re
         local workflow_running = ARGV[2]
         local workflow_failed = ARGV[3]
         local workflow_canceled = ARGV[4]
-        local job_queued = ARGV[5]
+        local job_pending_execution = ARGV[5]
         local job_running = ARGV[6]
         local job_canceled = ARGV[7]
 
@@ -132,7 +132,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(Re
         end
 
         local now = redis.call('TIME')[1]
-        if job_status ~= job_queued then
+        if job_status ~= job_pending_execution then
             -- Set workflow status to failed.
             redis.call('HSET', workflow_key,
                        'status', workflow_failed,

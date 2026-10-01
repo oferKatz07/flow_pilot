@@ -6,7 +6,7 @@ FlowPilot is a modern backend infrastructure project that explores production-gr
 
 The project focuses on the engineering challenges behind reliable distributed systems rather than workflow business logic. Its architecture emphasizes idempotent request admission, dependency-aware scheduling, durable request auditing and workflow persistence, and scalable asynchronous execution.
 
-The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY -> QUEUED -> RUNNING job transitions, runtime-owned scheduler and completion-handler components, worker dispatch, completion handling, clean shutdown, and recovery.
+The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY -> QUEUED -> PENDING_EXECUTION -> RUNNING job transitions, runtime-owned scheduler and completion-handler components, worker dispatch, completion handling, clean shutdown, and recovery.
 
 FlowPilot is being developed as a portfolio-quality system architecture project demonstrating modern C++ backend design, concurrent programming, and infrastructure engineering.
 
@@ -165,10 +165,10 @@ FlowPilot separates dependency readiness, workflow execution-slot reservation, s
 The current runtime job lifecycle is:
 
 ```text
-PENDING -> READY -> QUEUED -> RUNNING -> COMPLETED | FAILED | CANCELED
+PENDING -> READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> COMPLETED | FAILED | CANCELED
 ```
 
-`READY` means dependencies are satisfied. `QUEUED` means the workflow has reserved an execution slot and the job is eligible for scheduler dispatch. `RUNNING` begins only when a worker fetches the job and the execution timer starts.
+`READY` means dependencies are satisfied. `QUEUED` means the workflow has reserved an execution slot and the job is eligible for scheduler dispatch. `PENDING_EXECUTION` means a scheduler has claimed ownership of the job, but a worker has not started it yet. `RUNNING` begins only when a worker fetches the job and the execution timer starts.
 
 Redis is the runtime authority for these transitions during execution, while SQLite persists durable status and timestamp history.
 
@@ -281,7 +281,7 @@ These policies are loaded during initialization and applied during workflow admi
 
 The workflow admission subsystem is feature-complete and includes idempotent request handling, client policy enforcement, Redis-based admission control, durable request auditing, semantic workflow validation, DAG dependency validation, SQLite persistence, Redis runtime initialization, and initial execution-queue population.
 
-The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED -> RUNNING transitions, a Redis Stream-based completion path, runtime-managed scheduler/completion-handler lifecycles, configurable Redis I/O/scheduler/completion-handler counts, dynamic scheduler/completion-handler add/remove, clean shutdown tests, a runtime status API, and durable SQLite lifecycle timestamps.
+The workflow execution subsystem is in progress. The current code supports Redis runtime state, priority-based execution queueing, scheduler ownership through `owned_by`, bounded scheduler-local worker dispatch, QUEUED -> PENDING_EXECUTION -> RUNNING transitions, a Redis Stream-based completion path, runtime-managed scheduler/completion-handler lifecycles, configurable Redis I/O/scheduler/completion-handler counts, dynamic scheduler/completion-handler add/remove, clean shutdown tests, a runtime status API, and durable SQLite lifecycle timestamps.
 
 The new multi-component runtime also exposes the next data-integrity work clearly. The ordinary Redis command connection must be serialized per request/reply transaction (or replaced by a connection pool) before multiple Redis I/O threads are considered fully safe. Completion-side read/modify/write updates must become atomic and idempotent before multiple completion handlers are considered data-integrity safe, and the current destructive stream dequeue should evolve to consumer-group acknowledgement/recovery semantics. These are active execution-engine tasks rather than completed guarantees.
 
@@ -326,7 +326,7 @@ The new multi-component runtime also exposes the next data-integrity work clearl
 
 ✔ Dynamic scheduler/completion-handler add/remove lifecycle
 
-✔ READY/QUEUED/RUNNING lifecycle tests
+✔ READY/QUEUED/PENDING_EXECUTION/RUNNING lifecycle tests
 
 🚧 Serialize/pool ordinary Redis command connections for multi-I/O-thread safety
 
@@ -362,12 +362,12 @@ The new multi-component runtime also exposes the next data-integrity work clearl
 
 ### Phase 2 — Workflow Execution (In Progress)
 
-- Explicit PENDING/READY/QUEUED/RUNNING job lifecycle
+- Explicit PENDING/READY/QUEUED/PENDING_EXECUTION/RUNNING job lifecycle
 - Workflow execution-slot reservation
 - Priority-based Redis execution queue
 - Scheduler ownership for claimed jobs
 - Bounded local scheduler queue
-- Worker dispatch and QUEUED -> RUNNING transition
+- Worker dispatch and PENDING_EXECUTION -> RUNNING transition
 - Runtime-managed scheduler and completion-handler lifecycles
 - Configurable Redis I/O, scheduler, and completion-handler counts
 - Runtime status API
@@ -395,10 +395,10 @@ FlowPilot now supports multiple process-local schedulers and completion handlers
 * Serializing a complete Redis request/reply transaction per connection, or introducing a connection pool.
 * Moving completion counter/slot/state changes into atomic, idempotent Redis transitions.
 * Making completion delivery recoverable until processing succeeds.
-* Reclaiming QUEUED/RUNNING work owned by a failed scheduler.
+* Reclaiming PENDING_EXECUTION/RUNNING work owned by a failed scheduler.
 * Stress-testing invariants under simultaneous completions and runtime component churn.
 
-The core execution invariant is that workflow capacity is reserved before scheduler dispatch: `reserved_execution_slots` represents QUEUED and RUNNING jobs consuming workflow capacity. Redis is the active runtime authority; SQLite provides durable persisted state and recovery data.
+The core execution invariant is that workflow capacity is reserved before scheduler dispatch: `reserved_execution_slots` represents QUEUED, PENDING_EXECUTION, and RUNNING jobs consuming workflow capacity. Redis is the active runtime authority; SQLite provides durable persisted state and recovery data.
 
 ## Building & Running Locally
 

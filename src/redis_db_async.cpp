@@ -377,88 +377,36 @@ bool RedisDatabaseAsync::connect(const std::string& connection_string, const std
     return true;
 }
 
-bool RedisDatabaseAsync::register_scheduler(const std::string& scheduler_id)
-{
-    if (scheduler_id.empty()) {
-        Logger::get_logger()->error("register_scheduler - Scheduler id cannot be empty");
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(scheduler_clients_mutex_);
-    if (scheduler_blocking_clients_.find(scheduler_id) != scheduler_blocking_clients_.end()) {
-        return true;
-    }
-
-    auto client = std::make_shared<ImplAsync>(ioc_);
-    std::string error_message;
-    if (!client->connect(host_, port_, error_message)) {
-        Logger::get_logger()->error("register_scheduler - Scheduler {} failed to connect blocking client: {}",
-                                    scheduler_id,
-                                    error_message);
-        return false;
-    }
-
-    scheduler_blocking_clients_[scheduler_id] = std::move(client);
-    return true;
-}
-
-void RedisDatabaseAsync::deregister_scheduler(const std::string& scheduler_id)
-{
-    std::lock_guard<std::mutex> lock(scheduler_clients_mutex_);
-    auto client_it = scheduler_blocking_clients_.find(scheduler_id);
-    if (client_it != scheduler_blocking_clients_.end()) {
-        client_it->second->close();
-        scheduler_blocking_clients_.erase(client_it);
-    }
-}
-
 boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execution_async(
+    RedisConnectionContext& context,
     WorkflowIdentity& workflow_id,
     std::string& ready_job,
     std::string scheduler_id) {
-    // Each scheduler owns a dedicated Redis connection for blocking queue reads, so
-    // the normal command executor is never tied up waiting for work to arrive.
-    std::shared_ptr<ImplAsync> blocking_client;
-    {
-        std::lock_guard<std::mutex> lock(scheduler_clients_mutex_);
-        auto client_it = scheduler_blocking_clients_.find(scheduler_id);
-        if (client_it != scheduler_blocking_clients_.end()) {
-            blocking_client = client_it->second;
-        }
-    }
-
-    if (!blocking_client) {
-        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Scheduler {} is not registered",
-                                    scheduler_id);
+    if (scheduler_id.empty()) {
+        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Scheduler id cannot be empty");
         co_return false;
     }
-
-    RedisCommandExecutor blocking_executor(
-        [blocking_client](const std::vector<std::string>& args) -> boost::asio::awaitable<RedisReply> {
-            co_return co_await blocking_client->execute_async(args);
-        });
 
     std::string ready_job_key;
     while (true) {
         // Block for the configured timeout waiting for the next prioritized job key.
-        // An empty key is a timeout/no-work result, not a failure, so keep polling.
-        if (!co_await blocking_executor.execute_zset_blocking_dequeue_command_async(EXECUTION_QUEUE_KEY, ready_job_key, queue_read_timeout_)) {
+        // An empty key is a timeout/no-work result for this polling attempt.
+        if (!co_await context.command_executor().execute_zset_blocking_dequeue_command_async(
+                EXECUTION_QUEUE_KEY,
+                ready_job_key,
+                queue_read_timeout_)) {
             co_return false;
         }
 
         if (ready_job_key.empty()) {
-            std::lock_guard<std::mutex> lock(scheduler_clients_mutex_);
-            if (scheduler_blocking_clients_.find(scheduler_id) == scheduler_blocking_clients_.end()) {
-                co_return false;
-            }
-            continue;
+            co_return false;
         }
 
         // The queue stores Redis job hash keys. If a dequeued key was deleted by
         // cancellation/cleanup before we inspect it, ignore it and wait again.
         std::string job_type;
         std::vector<std::string> type_args{"TYPE", ready_job_key};
-        if (!co_await blocking_executor.execute_bulk_string_command_async(type_args, job_type)) {
+        if (!co_await context.command_executor().execute_bulk_string_command_async(type_args, job_type)) {
             co_return false;
         }
 
@@ -511,9 +459,45 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
             continue;
         }
 
-        std::unordered_map<std::string, std::string> fields{{"owned_by", scheduler_id}};
-        if (!co_await blocking_executor.execute_hset_command_async(ready_job_key, fields)) {
+        // Claim the popped job only if it is still waiting for scheduler ownership.
+        // A workflow failure may have canceled it after the blocking pop returned.
+        const std::string claim_lua_script = R"lua(
+            local job_key = KEYS[1]
+            local job_ready = ARGV[1]
+            local job_queued = ARGV[2]
+            local job_pending_execution = ARGV[3]
+            local scheduler_id = ARGV[4]
+
+            local job_status = redis.call('HGET', job_key, 'status')
+            if job_status ~= job_ready and job_status ~= job_queued then
+                return {0}
+            end
+
+            redis.call('HSET', job_key,
+                       'owned_by', scheduler_id,
+                       'status', job_pending_execution)
+            return {1}
+        )lua";
+        const std::vector<std::string> claim_keys{ready_job_key};
+        const std::vector<std::string> claim_args{
+            std::string(to_string(JobStatus::READY)),
+            std::string(to_string(JobStatus::QUEUED)),
+            std::string(to_string(JobStatus::PENDING_EXECUTION)),
+            scheduler_id
+        };
+        std::vector<std::string> claim_values;
+        if (!co_await context.command_executor().execute_lua_script_async(
+                claim_lua_script,
+                claim_keys,
+                claim_args,
+                claim_values)) {
             co_return false;
+        }
+        if (claim_values.size() != 1) {
+            co_return false;
+        }
+        if (claim_values[0] != "1") {
+            continue;
         }
 
         workflow_id.client_id = std::move(client_id);
@@ -522,85 +506,6 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execut
 
         co_return true;
     }
-}
-
-boost::asio::awaitable<bool> RedisDatabaseAsync::blocking_dequeue_job_for_execution_async(
-    RedisConnectionContext& context,
-    WorkflowIdentity& workflow_id,
-    std::string& ready_job,
-    const std::string& scheduler_id) {
-    std::string ready_job_key;
-
-    if (!co_await context.command_executor().execute_zset_blocking_dequeue_command_async(EXECUTION_QUEUE_KEY, ready_job_key, queue_read_timeout_)) {
-        co_return false;
-    }
-
-    if (ready_job_key.empty()) {
-        co_return false;
-    }
-
-    std::string job_type;
-    std::vector<std::string> type_args{"TYPE", ready_job_key};
-    if (!co_await context.command_executor().execute_bulk_string_command_async(type_args, job_type)) {
-        co_return false;
-    }
-
-    if (job_type == "none") {
-        co_return false;
-    }
-
-    if (job_type != "hash") {
-        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} type {} was dequeued",
-                                    ready_job_key,
-                                    job_type);
-        co_return false;
-    }
-
-    constexpr std::string_view job_key_prefix = "fp:job:";
-    if (ready_job_key.rfind(job_key_prefix, 0) != 0) {
-        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
-                                    ready_job_key);
-        co_return false;
-    }
-
-    size_t substr_start_pos = job_key_prefix.size();
-    size_t substr_end_pos = ready_job_key.find(":", substr_start_pos);
-    if (substr_end_pos == std::string::npos) {
-        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
-                                    ready_job_key);
-        co_return false;
-    }
-
-    std::string client_id = ready_job_key.substr(substr_start_pos, substr_end_pos - substr_start_pos);
-    substr_start_pos = substr_end_pos + 1;
-
-    substr_end_pos = ready_job_key.find(":", substr_start_pos);
-    if (substr_end_pos == std::string::npos) {
-        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
-                                    ready_job_key);
-        co_return false;
-    }
-
-    std::string workflow_id_value = ready_job_key.substr(substr_start_pos, substr_end_pos - substr_start_pos);
-    substr_start_pos = substr_end_pos + 1;
-
-    std::string job_id = ready_job_key.substr(substr_start_pos);
-    if (client_id.empty() || workflow_id_value.empty() || job_id.empty()) {
-        Logger::get_logger()->error("blocking_dequeue_job_for_execution_async - Invalid ready_job key {} was dequeud",
-                                    ready_job_key);
-        co_return false;
-    }
-
-    std::unordered_map<std::string, std::string> fields{{"owned_by", scheduler_id}};
-    if (!co_await context.command_executor().execute_hset_command_async(ready_job_key, fields)) {
-        co_return false;
-    }
-
-    workflow_id.client_id = std::move(client_id);
-    workflow_id.workflow_id = std::move(workflow_id_value);
-    ready_job = std::move(job_id);
-
-    co_return true;
 }
 
 boost::asio::awaitable<void> RedisDatabaseAsync::wait_for_ready_job_event_async(std::string scheduler_id) {

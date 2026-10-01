@@ -223,7 +223,6 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
     const std::string& failed_job_id,
     int updated_retry_count,
     const std::vector<std::string>& workflow_job_ids,
-    const std::string& last_update_time,
     std::vector<std::string>& canceled_job_ids,
     bool& workflow_failed,
     bool& workflow_completed)
@@ -234,7 +233,6 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
         failed_job_id,
         updated_retry_count,
         workflow_job_ids,
-        last_update_time,
         canceled_job_ids,
         workflow_failed,
         workflow_completed);
@@ -246,11 +244,13 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
     const std::string& failed_job_id,
     int updated_retry_count,
     const std::vector<std::string>& workflow_job_ids,
-    const std::string& last_update_time,
     std::vector<std::string>& canceled_job_ids,
     bool& workflow_failed,
     bool& workflow_completed)
 {
+    // This is the Redis-side terminal failure path. The SQL database is updated
+    // by the caller after this returns, so keep the Redis mutation atomic and
+    // return enough detail for the caller to mirror the affected job statuses.
     canceled_job_ids.clear();
     workflow_failed = false;
     workflow_completed = false;
@@ -263,7 +263,6 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
 
     std::vector<std::string> args{
         std::to_string(updated_retry_count),
-        last_update_time,
         std::string(to_string(WorkflowStatus::RUNNING)),
         std::string(to_string(WorkflowStatus::FAILED)),
         std::string(to_string(JobStatus::PENDING)),
@@ -275,6 +274,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
     };
 
     for (const auto& job_id : workflow_job_ids) {
+        // The Lua script needs both the external job id to report back and the
+        // Redis hash key to inspect/update the runtime state atomically.
         args.push_back(job_id);
         args.push_back(RedisKeys::job_key(workflow_id, job_id));
     }
@@ -286,26 +287,29 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
         local failed_job_key = KEYS[4]
 
         local updated_retry_count = ARGV[1]
-        local last_update_time = ARGV[2]
-        local workflow_running = ARGV[3]
-        local workflow_failed = ARGV[4]
-        local job_pending = ARGV[5]
-        local job_ready = ARGV[6]
-        local job_queued = ARGV[7]
-        local job_failed = ARGV[8]
-        local job_canceled = ARGV[9]
-        local job_count = tonumber(ARGV[10]) or 0
+        local workflow_running = ARGV[2]
+        local workflow_failed = ARGV[3]
+        local job_pending = ARGV[4]
+        local job_ready = ARGV[5]
+        local job_queued = ARGV[6]
+        local job_failed = ARGV[7]
+        local job_canceled = ARGV[8]
+        local job_count = tonumber(ARGV[9]) or 0
+        local now = redis.call('TIME')[1]
 
         redis.call('HSET', failed_job_key,
                    'status', job_failed,
                    'current_retry_count', updated_retry_count,
-                   'last_update_time', last_update_time)
+                   'last_update_time', now)
 
         local workflow_status = redis.call('HGET', workflow_key, 'status') or ''
         local completed_increment = 1
         local failed_workflow = 0
         local canceled = {}
 
+        -- Only the first terminal job failure should fail the workflow and
+        -- cancel sibling jobs. Later completions for the same workflow still
+        -- record their own failed job, but do not re-cancel the workflow.
         if workflow_status == workflow_running then
             failed_workflow = 1
             local reserved_slots = tonumber(redis.call('HGET', workflow_key, 'reserved_execution_slots') or '0') or 0
@@ -315,9 +319,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
             redis.call('HSET', workflow_key,
                        'status', workflow_failed,
                        'reserved_execution_slots', reserved_slots,
-                       'last_update_time', last_update_time)
+                       'last_update_time', now)
 
-            local idx = 11
+            local idx = 10
             for _ = 1, job_count do
                 local job_id = ARGV[idx]
                 local job_key = ARGV[idx + 1]
@@ -325,10 +329,16 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
 
                 if job_key ~= failed_job_key then
                     local job_status = redis.call('HGET', job_key, 'status') or ''
+
                     if job_status == job_pending or job_status == job_ready or job_status == job_queued then
+                        -- Pending/ready/queued jobs have not completed yet, so
+                        -- cancel them and remove them from the appropriate redis queue
+                        -- where they may still be pending.
+                        -- Scheduler-owned jobs are PENDING_EXECUTION, so they are
+                        -- deliberately left for their worker/completion path.
                         redis.call('HSET', job_key,
                                    'status', job_canceled,
-                                   'last_update_time', last_update_time)
+                                   'last_update_time', now)
                         redis.call('ZREM', waiting_ready_key, job_key)
                         if job_status == job_queued then
                             redis.call('ZREM', execution_queue_key, job_key)
@@ -340,9 +350,11 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
             end
         end
 
+        -- Canceled siblings count as completed runtime work because they will
+        -- never produce their own completion event after the workflow fails.
         local completed_jobs = redis.call('HINCRBY', workflow_key, 'completed_jobs', completed_increment)
         redis.call('HINCRBY', workflow_key, 'failed_jobs', 1)
-        redis.call('HSET', workflow_key, 'last_update_time', last_update_time)
+        redis.call('HSET', workflow_key, 'last_update_time', now)
 
         local total_jobs = tonumber(redis.call('HGET', workflow_key, 'total_jobs') or '0') or 0
         local completed_workflow = 0
@@ -350,6 +362,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
             completed_workflow = 1
         end
 
+        -- Result contract:
+        -- {ok, workflow_failed_now, workflow_completed, canceled_count, canceled_job_id...}
         local result = {1, tostring(failed_workflow), tostring(completed_workflow), tostring(#canceled)}
         for _, job_id in ipairs(canceled) do
             table.insert(result, job_id)
@@ -366,6 +380,9 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::complete_failed_job_runtime_asy
     workflow_failed = values[1] == "1";
     workflow_completed = values[2] == "1";
 
+    // Validate the variable-length result before exposing canceled_job_ids to
+    // the caller. A malformed script response means the SQL mirror should not
+    // be updated from partial data.
     std::size_t canceled_count = 0;
     try {
         canceled_count = static_cast<std::size_t>(std::stoul(values[3]));

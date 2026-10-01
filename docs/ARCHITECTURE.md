@@ -10,7 +10,7 @@ The admission subsystem validates incoming workflows, enforces client policies a
 
 The scheduler then operates on the prepared runtime state in Redis. During normal execution, the scheduler does not access SQLite. Redis contains the runtime state required to schedule and execute jobs, while SQLite provides durable persistence and the basis for recovery.
 
-The workflow admission phase is complete. The current execution architecture uses an explicit READY -> QUEUED -> RUNNING -> COMPLETED/FAILED/CANCELED lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, runtime-owned scheduler and completion-handler components, configurable Redis I/O threads, and durable execution timestamps/statuses in SQLite. Current development is focused on completing execution semantics, recovery, and operational visibility.
+The workflow admission phase is complete. The current execution architecture uses an explicit READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> COMPLETED/FAILED/CANCELED lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, runtime-owned scheduler and completion-handler components, configurable Redis I/O threads, and durable execution timestamps/statuses in SQLite. Current development is focused on completing execution semantics, recovery, and operational visibility.
 
 ---
 
@@ -72,7 +72,7 @@ This provides a clean boundary between workflow admission and workflow execution
 
 The Redis `execution_queue` sorted set is the scheduler-facing collection of execution-eligible jobs.
 
-A job is inserted into `execution_queue` only after its dependencies are satisfied and the workflow has reserved an execution slot for it, transitioning the job to QUEUED.
+A job is inserted into `execution_queue` only after its dependencies are satisfied and the workflow has reserved an execution slot for it, transitioning the job to QUEUED. When a scheduler claims that queued job, ownership moves to the scheduler and the job transitions to PENDING_EXECUTION until a worker starts it.
 
 This ordering ensures that a scheduler can never observe a job before the runtime data required to execute that job has been created.
 
@@ -256,10 +256,10 @@ Jobs with no unresolved dependencies enter the **READY** state.
 A READY job does not consume workflow execution capacity. When an execution slot is available, the workflow reserves the slot and transitions a selected READY job to **QUEUED**.
 
 ```text
-reserved_execution_slots = QUEUED jobs + RUNNING jobs
+reserved_execution_slots = QUEUED jobs + PENDING_EXECUTION jobs + RUNNING jobs
 ```
 
-QUEUED jobs are execution-eligible and are inserted into the Redis `execution_queue` sorted set for scheduler dispatch.
+QUEUED jobs are execution-eligible and are inserted into the Redis `execution_queue` sorted set for scheduler claim.
 
 The initialization path is:
 
@@ -284,6 +284,12 @@ Dependencies satisfied
        |
        v
 Insert into execution_queue
+       |
+       v
+Scheduler claims ownership
+       |
+       v
+ PENDING_EXECUTION
        |
        v
 Scheduler dispatch
@@ -321,7 +327,7 @@ The runtime provides a process-local status snapshot used by the HTTP status API
 
 The scheduler is the core component of the workflow execution subsystem.
 
-Its primary responsibility is to select QUEUED jobs that have already been granted a workflow execution slot, prioritize them, and coordinate their dispatch into the worker/executor layer according to available worker capacity.
+Its primary responsibility is to select QUEUED jobs that have already been granted a workflow execution slot, claim them as PENDING_EXECUTION under scheduler ownership, prioritize them, and coordinate their dispatch into the worker/executor layer according to available worker capacity.
 
 FlowPilot separates **dependency readiness**, **workflow execution eligibility**, and **actual execution**:
 
@@ -336,6 +342,10 @@ PENDING
    v
  QUEUED
    |
+   | scheduler claims ownership
+   v
+ PENDING_EXECUTION
+   |
    | worker fetches job
    v
  RUNNING
@@ -347,7 +357,7 @@ PENDING
    +------> CANCELED
 ```
 
-A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be running. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry currently remains part of the RUNNING execution lifecycle while retry bookkeeping is recorded. Delayed retry requeueing is the next step of the retry implementation; no separate RETRYING state is used.
+A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be owned by a scheduler or running. PENDING_EXECUTION means a scheduler owns the job and is responsible for dispatching it to a worker, but execution timing has not started yet. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry currently remains part of the RUNNING execution lifecycle while retry bookkeeping is recorded. Delayed retry requeueing is the next step of the retry implementation; no separate RETRYING state is used.
 
 ## Scheduler Responsibilities
 
@@ -356,9 +366,9 @@ The scheduler is responsible for:
 * Consuming priority-ordered QUEUED jobs from the Redis scheduler-facing structure.
 * Obtaining job and workflow runtime information from Redis.
 * Treating QUEUED jobs as already admitted by the workflow for execution; the scheduler does not decide whether the workflow has a free execution slot.
-* Recording scheduler ownership for jobs it has reserved.
+* Recording scheduler ownership for jobs it has claimed and moving them to PENDING_EXECUTION.
 * Maintaining a bounded local set of jobs waiting to be executed.
-* Dispatching QUEUED jobs to available workers/executors.
+* Dispatching PENDING_EXECUTION jobs to available workers/executors.
 * Transitioning a job to RUNNING only when a worker actually fetches it.
 * Starting the execution-time budget when the worker fetches the job, rather than when the scheduler reserves it.
 * Monitoring dispatcher and worker-thread health.
@@ -377,7 +387,7 @@ The scheduler uses:
 
 * A bounded collection of jobs already reserved by the scheduler and waiting for worker capacity.
 * A priority-ordered local container for efficient selection of the next job to execute.
-* Scheduler identity stored in the job's `owned_by` field after a scheduler claims a QUEUED job. Workflow execution-slot reservation and scheduler ownership are separate concepts.
+* Scheduler identity stored in the job's `owned_by` field after a scheduler claims a QUEUED job and moves it to PENDING_EXECUTION. Workflow execution-slot reservation and scheduler ownership are separate concepts.
 * Per-worker in-flight job ownership, heartbeat, and last-progress metadata for health monitoring.
 * A scheduler-local recovery queue used to reprocess jobs whose worker thread failed before reporting completion.
 
@@ -401,7 +411,7 @@ Worker-thread failure is handled locally by the scheduler that owns the worker. 
 Recovery must preserve the execution-slot invariant:
 
 ```text
-reserved_execution_slots = QUEUED jobs + RUNNING jobs
+reserved_execution_slots = QUEUED jobs + PENDING_EXECUTION jobs + RUNNING jobs
 ```
 
 For a reclaimed job:
@@ -483,7 +493,7 @@ SQLite remains relevant for persistence and recovery, but is outside the schedul
 
 `execution_queue` is the primary scheduler input structure and is implemented as a Redis sorted set ordered by job priority.
 
-`execution_queue` contains **QUEUED** jobs: jobs whose dependencies are satisfied and for which the workflow has reserved an execution slot.
+`execution_queue` contains **QUEUED** jobs: jobs whose dependencies are satisfied and for which the workflow has reserved an execution slot. Once a scheduler pops and claims a job from this queue, the job leaves the global queue and becomes **PENDING_EXECUTION** under that scheduler's ownership.
 
 The runtime transitions are:
 
@@ -498,6 +508,10 @@ PENDING
    v
  QUEUED  ---> inserted into execution_queue
    |
+   | scheduler claims ownership
+   v
+ PENDING_EXECUTION
+   |
    | worker fetches job
    v
  RUNNING
@@ -506,13 +520,14 @@ PENDING
 The states have distinct meanings:
 
 * **READY** — dependencies are satisfied; no execution slot is reserved.
-* **QUEUED** — an execution slot is reserved; the job is eligible for scheduler/worker dispatch.
+* **QUEUED** — an execution slot is reserved; the job is eligible for scheduler claim.
+* **PENDING_EXECUTION** — a scheduler owns the job and is waiting to hand it to a worker.
 * **RUNNING** — a worker has fetched the job and execution has started.
 
 Per-workflow concurrency is represented by:
 
 ```text
-reserved_execution_slots = QUEUED jobs + RUNNING jobs
+reserved_execution_slots = QUEUED jobs + PENDING_EXECUTION jobs + RUNNING jobs
 ```
 
 The slot is reserved on READY → QUEUED and released when the execution attempt completes or otherwise leaves the slot-consuming lifecycle.
@@ -563,6 +578,12 @@ remaining_dependencies == 0
         |
         v
 insert into execution_queue
+        |
+        v
+ scheduler claims ownership
+        |
+        v
+ PENDING_EXECUTION
 ```
 
 Independent branches can therefore become READY concurrently, while the workflow's execution-slot limit controls how many are promoted to QUEUED.
@@ -582,6 +603,10 @@ PENDING
    v
  QUEUED
    |
+   | scheduler claims ownership
+   v
+ PENDING_EXECUTION
+   |
    | worker fetches job
    v
  RUNNING
@@ -597,7 +622,8 @@ The current job states are:
 
 * `PENDING` — waiting for dependencies.
 * `READY` — dependencies are satisfied and the job is globally schedulable.
-* `QUEUED` — granted one of the workflow's execution slots and eligible for scheduler/worker dispatch.
+* `QUEUED` — granted one of the workflow's execution slots and eligible for scheduler claim.
+* `PENDING_EXECUTION` — claimed by a scheduler and waiting for worker execution.
 * `RUNNING` — fetched by a worker; execution timing starts here.
 * `COMPLETED` — completed successfully.
 * `FAILED` — execution failed with no further retry scheduled.
@@ -605,7 +631,7 @@ The current job states are:
 
 Retry is modeled orthogonally to the state machine using the retry counter. A retry-eligible job returns to READY after the configured delay rather than entering a separate RETRYING state.
 
-SQLite persists the corresponding status transitions and timestamps. In particular, READY and QUEUED are kept distinct so future statistics can measure time spent dependency-ready, waiting for a workflow execution slot, queued for scheduler/worker dispatch, and actually running.
+Redis keeps READY, QUEUED, PENDING_EXECUTION, and RUNNING distinct so runtime logic can separate dependency readiness, workflow slot reservation, scheduler ownership, and actual execution. SQLite persists the durable status transitions and timestamps that are part of the current persisted lifecycle, especially READY, QUEUED, RUNNING, and terminal outcomes.
 
 
 # Worker / Executor Integration
@@ -800,12 +826,12 @@ Workflow runtime admission controls per-workflow execution concurrency by granti
 The scheduler must therefore distinguish between:
 
 * Workflow-level execution-slot capacity.
-* `reserved_execution_slots`, which counts both QUEUED and RUNNING jobs.
+* `reserved_execution_slots`, which counts QUEUED, PENDING_EXECUTION, and RUNNING jobs.
 * Jobs claimed by a scheduler but not yet running.
 * Global worker/executor capacity.
 * Client-level execution policy where applicable.
 
-A job becoming QUEUED is not equivalent to it becoming RUNNING. QUEUED means the workflow has reserved capacity for the job; RUNNING means a worker has actually fetched it. Therefore `reserved_execution_slots = QUEUED jobs + RUNNING jobs`, and the execution timeout starts only at RUNNING.
+A job becoming QUEUED is not equivalent to it becoming RUNNING. QUEUED means the workflow has reserved capacity for the job and placed it in the global execution queue. PENDING_EXECUTION means a scheduler owns the job but no worker has started it yet. RUNNING means a worker has actually fetched it. Therefore `reserved_execution_slots = QUEUED jobs + PENDING_EXECUTION jobs + RUNNING jobs`, and the execution timeout starts only at RUNNING.
 
 Each scheduler uses a bounded local worker queue and priority-ordered dispatch. Scheduler-local fairness mechanisms can be added without changing persisted job priority. Multiple scheduler instances may run in one process, and a scheduler can be stopped and removed while other schedulers continue consuming Redis runtime work.
 
@@ -813,12 +839,12 @@ Each scheduler uses a bounded local worker queue and priority-ordered dispatch. 
 Important runtime invariants for concurrent execution are:
 
 ```text
-reserved_execution_slots = QUEUED jobs + RUNNING jobs consuming workflow capacity
+reserved_execution_slots = QUEUED jobs + PENDING_EXECUTION jobs + RUNNING jobs consuming workflow capacity
 
 A completion event changes terminal state/counters at most once
 
-A QUEUED job is either present in the global execution queue
-or is owned by a live scheduler that can progress/recover it
+A QUEUED job is present in the global execution queue
+A PENDING_EXECUTION job is owned by a live scheduler that can progress/recover it
 ```
 
 The last invariant is not yet fully recoverable across scheduler/process failure. Scheduler ownership (`owned_by`) provides the information required for later dead-scheduler reclamation, but the distributed recovery coordinator is still planned.
@@ -853,8 +879,8 @@ The execution model, persistence support, and process-local runtime lifecycle ha
 
 Implemented/refined:
 
-* Explicit `PENDING`, `READY`, `QUEUED`, `RUNNING`, `SUCCESS`, `FAILED`, and `CANCELED` job states.
-* Durable SQLite support for READY/QUEUED/RUNNING lifecycle transitions and execution timing.
+* Explicit `PENDING`, `READY`, `QUEUED`, `PENDING_EXECUTION`, `RUNNING`, `COMPLETED`, `FAILED`, and `CANCELED` job states.
+* Redis runtime support for READY/QUEUED/PENDING_EXECUTION/RUNNING lifecycle transitions, with durable SQLite support for persisted lifecycle timestamps and terminal outcomes.
 * Redis runtime representation for scheduler-visible job state.
 * Priority-aware `execution_queue` sorted-set design.
 * Workflow execution-slot reservation tracked through `reserved_execution_slots`.
@@ -930,6 +956,8 @@ The most important boundary in the current architecture is:
                     |  Scheduler  |
                     +------+------+
                            |
+              PENDING_EXECUTION ownership
+                           |
                     Job execution
                            |
                     +------v------+
@@ -943,7 +971,7 @@ Admission answers:
 
 The scheduler answers:
 
-> **"Given the jobs that workflows have already made eligible for execution, which QUEUED jobs should be claimed, prioritized, and dispatched next?"**
+> **"Given the jobs that workflows have already made eligible for execution, which QUEUED jobs should be claimed as PENDING_EXECUTION, prioritized, and dispatched next?"**
 
 This separation is central to FlowPilot's architecture.
 

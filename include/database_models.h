@@ -135,10 +135,11 @@ enum class JobStatus : uint8_t {
     PENDING = 0,
     READY = 1,
     QUEUED = 2,
-    RUNNING = 3,
-    COMPLETED = 4,
-    FAILED = 5,
-    CANCELED = 6,
+    PENDING_EXECUTION = 3,
+    RUNNING = 4,
+    COMPLETED = 5,
+    FAILED = 6,
+    CANCELED = 7,
     // UNKNOWN must remain the last enumerator.
     // Values >= UNKNOWN are considered invalid.
     UNKNOWN
@@ -164,6 +165,7 @@ inline std::string_view to_string(JobStatus status) noexcept{
         case JobStatus::PENDING: return "PENDING";
         case JobStatus::READY: return "READY";
         case JobStatus::QUEUED: return "QUEUED";
+        case JobStatus::PENDING_EXECUTION: return "PENDING_EXECUTION";
         case JobStatus::RUNNING: return "RUNNING";
         case JobStatus::COMPLETED: return "COMPLETED";
         case JobStatus::FAILED: return "FAILED";

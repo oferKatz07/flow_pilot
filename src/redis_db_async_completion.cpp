@@ -24,6 +24,9 @@ JobStatus job_status_from_string(const std::string& value)
     if (value == to_string(JobStatus::QUEUED)) {
         return JobStatus::QUEUED;
     }
+    if (value == to_string(JobStatus::PENDING_EXECUTION)) {
+        return JobStatus::PENDING_EXECUTION;
+    }
     if (value == to_string(JobStatus::RUNNING)) {
         return JobStatus::RUNNING;
     }
