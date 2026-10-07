@@ -60,6 +60,7 @@ int retry_jitter_ms()
 bool is_waiting_to_run(JobStatus status)
 {
     return status == JobStatus::PENDING ||
+           status == JobStatus::RETRY_DELAY ||
            status == JobStatus::READY ||
            status == JobStatus::QUEUED;
 }
@@ -275,7 +276,7 @@ boost::asio::awaitable<bool> CompletionHandler::process_completed_jobs(JobComple
 
     if (completion_data.status != JobStatus::COMPLETED &&
         completion_data.status != JobStatus::FAILED &&
-        completion_data.status != JobStatus::CANCELED) {
+        completion_data.status != JobStatus::ABORTED) {
         Logger::get_logger()->error(
             "process_completed_jobs - unsupported completion status; treating as internal failure: client_id={}, "
             "workflow_id={}, job_id={}, status={}",
@@ -288,7 +289,7 @@ boost::asio::awaitable<bool> CompletionHandler::process_completed_jobs(JobComple
     }
 
     if (completion_data.status == JobStatus::FAILED ||
-        completion_data.status == JobStatus::CANCELED) {
+        completion_data.status == JobStatus::ABORTED) {
         JobRuntimeData job_runtime;
         if (!co_await redis_db->fetch_job_runtime_async(*redis_context_,
                                                         identity,
@@ -325,31 +326,17 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_completed(
     const auto& identity = completion_data.identity;
     const std::string now = now_as_string();
 
-    std::unordered_map<std::string, std::string> job_updates{
-        {"status", std::string(to_string(JobStatus::COMPLETED))},
-        {"last_update_time", now}
-    };
-    if (!co_await redis_db->update_job_runtime_async(*redis_context_,
-                                                     identity,
-                                                     completion_data.job_id,
-                                                     job_updates)) {
-        co_return false;
-    }
-
     bool workflow_completed = false;
-    if (!co_await redis_db->increment_completed_jobs_and_complete_workflow_if_ready_async(
-            *redis_context_,
-            identity,
-            now,
-            workflow_completed)) {
-        co_return false;
-    }
-
+    std::vector<std::string> ready_job_ids;
     std::string promoted_job_id;
-    if (!co_await redis_db->release_execution_slot_and_promote_ready_job_async(
+    if (!co_await redis_db->complete_successful_job_runtime_async(
             *redis_context_,
             identity,
-            promoted_job_id)) {
+            completion_data.job_id,
+            now,
+            ready_job_ids,
+            promoted_job_id,
+            workflow_completed)) {
         co_return false;
     }
 
@@ -367,13 +354,15 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_completed(
         co_return false;
     }
 
-    if (!promoted_job_id.empty()) {
-        std::vector<std::string> queued_jobs{promoted_job_id};
-        std::vector<std::string> ready_jobs;
+    if (!promoted_job_id.empty() || !ready_job_ids.empty()) {
+        std::vector<std::string> queued_jobs;
+        if (!promoted_job_id.empty()) {
+            queued_jobs.push_back(promoted_job_id);
+        }
         if (!co_await db.update_ready_jobs_async(identity.client_id,
                                                  identity.workflow_id,
                                                  queued_jobs,
-                                                 ready_jobs)) {
+                                                 ready_job_ids)) {
             co_return false;
         }
     }
@@ -439,7 +428,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
     const int updated_retry_count = job_runtime.current_retry_count + 1;
     const bool can_retry = completion_data.status == JobStatus::FAILED;
     const JobStatus terminal_job_status =
-        completion_data.status == JobStatus::CANCELED ? JobStatus::CANCELED : JobStatus::FAILED;
+        completion_data.status == JobStatus::ABORTED ? JobStatus::ABORTED : JobStatus::FAILED;
     const auto workflow_status_it = workflow_fields.find("status");
     const bool workflow_running =
         workflow_status_it != workflow_fields.end() &&
@@ -447,7 +436,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
 
     if (can_retry &&
         workflow_running &&
-        updated_retry_count < job_runtime.max_retries &&
+        updated_retry_count <= job_runtime.max_retries &&
         !is_job_runtime_expired(job_runtime)) {
         const bool retried = co_await handle_job_retry(completion_data,
                                                        updated_retry_count,
@@ -500,9 +489,9 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
 
     bool persisted = true;
 
-    if (terminal_job_status == JobStatus::CANCELED) {
+    if (terminal_job_status == JobStatus::ABORTED) {
         std::unordered_map<std::string, std::string> canceled_job_updates{
-            {"status", std::string(to_string(JobStatus::CANCELED))},
+            {"status", std::string(to_string(JobStatus::ABORTED))},
             {"last_update_time", now_as_string()}
         };
         if (!co_await redis_db->update_job_runtime_async(*redis_context_,
@@ -537,7 +526,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_failed(
         if (!co_await db.update_job_status_async(identity.client_id,
                                                  identity.workflow_id,
                                                  canceled_job_id,
-                                                 JobStatus::CANCELED)) {
+                                                 JobStatus::ABORTED)) {
             Logger::get_logger()->error(
                 "handle_job_failed - failed to persist canceled job status: client_id={}, workflow_id={}, job_id={}",
                 identity.client_id,
@@ -610,9 +599,10 @@ boost::asio::awaitable<bool> CompletionHandler::persist_failed_workflow_after_ru
 
         JobStatus target_status = JobStatus::UNKNOWN;
         if (job.status == JobStatus::PENDING ||
+            job.status == JobStatus::RETRY_DELAY ||
             job.status == JobStatus::READY ||
             job.status == JobStatus::QUEUED) {
-            target_status = JobStatus::CANCELED;
+            target_status = JobStatus::ABORTED;
         } else if (job.status == JobStatus::RUNNING) {
             target_status = JobStatus::FAILED;
         } else {
@@ -669,7 +659,7 @@ boost::asio::awaitable<bool> CompletionHandler::persist_failed_workflow_after_mi
     for (const auto& job : workflow_jobs) {
         JobStatus target_status = JobStatus::UNKNOWN;
         if (is_waiting_to_run(job.status)) {
-            target_status = JobStatus::CANCELED;
+            target_status = JobStatus::ABORTED;
         } else if (job.status == JobStatus::RUNNING) {
             target_status = JobStatus::FAILED;
         } else {
@@ -730,7 +720,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_retry(const JobComple
     if (!co_await db.update_job_status_async(identity.client_id,
                                              identity.workflow_id,
                                              completion_data.job_id,
-                                             JobStatus::PENDING)) {
+                                             JobStatus::RETRY_DELAY)) {
         co_return false;
     }
 
@@ -768,7 +758,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_canceled(
     const int reserved_slots = parse_int_field(workflow_fields, "reserved_execution_slots");
 
     std::unordered_map<std::string, std::string> canceled_job_updates{
-        {"status", std::string(to_string(JobStatus::CANCELED))},
+        {"status", std::string(to_string(JobStatus::ABORTED))},
         {"last_update_time", now}
     };
     if (!co_await redis_db->update_job_runtime_async(*redis_context_,
@@ -791,7 +781,7 @@ boost::asio::awaitable<bool> CompletionHandler::handle_job_canceled(
     const bool job_canceled = co_await db.update_job_status_async(identity.client_id,
                                                                  identity.workflow_id,
                                                                  completion_data.job_id,
-                                                                 JobStatus::CANCELED);
+                                                                 JobStatus::ABORTED);
     co_return job_canceled;
 }
 

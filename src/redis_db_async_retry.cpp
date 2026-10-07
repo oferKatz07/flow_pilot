@@ -84,7 +84,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::schedule_job_retry_async(
         std::to_string(updated_retry_count),
         std::to_string(retry_at_ms),
         std::string(to_string(WorkflowStatus::RUNNING)),
-        std::string(to_string(JobStatus::PENDING)),
+        std::string(to_string(JobStatus::RETRY_DELAY)),
         std::string(to_string(JobStatus::QUEUED)),
         JOB_RETRY_READY_CHANNEL
     };
@@ -99,14 +99,14 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::schedule_job_retry_async(
         local updated_retry_count = ARGV[1]
         local retry_at_ms = ARGV[2]
         local workflow_running = ARGV[3]
-        local job_pending = ARGV[4]
+        local job_retry_delay = ARGV[4]
         local job_queued = ARGV[5]
         local ready_channel = ARGV[6]
 
         local now = redis.call('TIME')[1]
         redis.call('HSET',
                    retry_job_key,
-                   'status', job_pending,
+                   'status', job_retry_delay,
                    'current_retry_count', updated_retry_count,
                    'start_run_time', '',
                    'owned_by', '',
@@ -242,10 +242,10 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::promote_retry_job_async(
     const std::vector<std::string> keys{workflow_key, waiting_ready_key, EXECUTION_QUEUE_KEY, retry_job_key};
     const std::vector<std::string> args{
         std::string(to_string(WorkflowStatus::RUNNING)),
-        std::string(to_string(JobStatus::PENDING)),
+        std::string(to_string(JobStatus::RETRY_DELAY)),
         std::string(to_string(JobStatus::READY)),
         std::string(to_string(JobStatus::QUEUED)),
-        std::string(to_string(JobStatus::CANCELED))
+        std::string(to_string(JobStatus::ABORTED))
     };
 
     const std::string lua_script = R"lua(
@@ -255,7 +255,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::promote_retry_job_async(
         local retry_job_key = KEYS[4]
 
         local workflow_running = ARGV[1]
-        local job_pending = ARGV[2]
+        local job_retry_delay = ARGV[2]
         local job_ready = ARGV[3]
         local job_queued = ARGV[4]
         local job_canceled = ARGV[5]
@@ -270,7 +270,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::promote_retry_job_async(
             redis.call('HSET', retry_job_key, 'status', job_canceled, 'last_update_time', now)
             return {1, ''}
         end
-        if job_status ~= job_pending and job_status ~= job_ready then
+        if job_status ~= job_retry_delay and job_status ~= job_ready then
             return {1, ''}
         end
 

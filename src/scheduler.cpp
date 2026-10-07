@@ -2,6 +2,7 @@
 
 #include "scheduler.h"
 
+#include "flow_pilot_error_msgs.h"
 #include "logger.h"
 #include "redis_db_async.h"
 
@@ -80,9 +81,40 @@ boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
             continue;
         }
 
-        // Get the job payload from the workflow runtime data
-        // TBD check return status and handle errors
-        co_await redis_db->fetch_job_payload_async(*redis_context_, job_info.identity, job_info.job_id, job_info.payload);
+        if (job_info.payload_size_bytes > 0) {
+            const bool payload_fetched = co_await redis_db->fetch_job_payload_async(
+                *redis_context_,
+                job_info.identity,
+                job_info.job_id,
+                job_info.payload);
+            if (!payload_fetched || job_info.payload.size() != job_info.payload_size_bytes) {
+                Logger::get_logger()->error(
+                    "scheduler_main_loop - failed to fetch valid payload for job: client_id={}, workflow_id={}, "
+                    "job_id={}, expected_payload_size={}, actual_payload_size={}",
+                    job_info.identity.client_id,
+                    job_info.identity.workflow_id,
+                    job_info.job_id,
+                    job_info.payload_size_bytes,
+                    job_info.payload.size());
+
+                JobCompletionData completion_data;
+                completion_data.identity = job_info.identity;
+                completion_data.job_id = job_info.job_id;
+                completion_data.status = JobStatus::ABORTED;
+                completion_data.error_code = StatusCodes::INTERNAL_DB_FAILURE;
+                if (!co_await redis_db->enqueue_job_completion_async(*redis_context_, completion_data)) {
+                    Logger::get_logger()->error(
+                        "scheduler_main_loop - failed to enqueue payload failure completion for job: client_id={}, "
+                        "workflow_id={}, job_id={}",
+                        job_info.identity.client_id,
+                        job_info.identity.workflow_id,
+                        job_info.job_id);
+                }
+                continue;
+            }
+        } else {
+            job_info.payload.clear();
+        }
 
         if (!worker_thread_queue_.push(std::move(job_info))) {
             break;
@@ -173,6 +205,17 @@ boost::asio::awaitable<bool> scheduler::get_next_ready_job(JobExeData& job_info)
     auto redis_db = RedisDatabaseAsync::get_instance();
     while (running_.load(std::memory_order_acquire)) {
         if (co_await redis_db->blocking_dequeue_job_for_execution_async(*redis_context_, job_info.identity, job_info.job_id, scheduler_redis_connection_id_)) {
+            JobRuntimeData job_runtime;
+            if (!co_await redis_db->fetch_job_runtime_async(*redis_context_,
+                                                            job_info.identity,
+                                                            job_info.job_id,
+                                                            job_runtime)) {
+                co_return false;
+            }
+            job_info.job_name = job_runtime.job_name;
+            job_info.payload_size_bytes = job_runtime.payload_size_bytes > 0
+                ? static_cast<size_t>(job_runtime.payload_size_bytes)
+                : 0;
             co_return true;
         }
 

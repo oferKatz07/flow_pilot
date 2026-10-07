@@ -137,12 +137,14 @@ enum class JobStatus : uint8_t {
     QUEUED = 2,
     PENDING_EXECUTION = 3,
     RUNNING = 4,
+    RETRY_DELAY = 8,
     COMPLETED = 5,
     FAILED = 6,
-    CANCELED = 7,
+    ABORTED = 7,
+    CANCELED = 9,
     // UNKNOWN must remain the last enumerator.
     // Values >= UNKNOWN are considered invalid.
-    UNKNOWN
+    UNKNOWN = 10
 };
 
 // Convertion from int to JobStatus
@@ -167,8 +169,10 @@ inline std::string_view to_string(JobStatus status) noexcept{
         case JobStatus::QUEUED: return "QUEUED";
         case JobStatus::PENDING_EXECUTION: return "PENDING_EXECUTION";
         case JobStatus::RUNNING: return "RUNNING";
+        case JobStatus::RETRY_DELAY: return "RETRY_DELAY";
         case JobStatus::COMPLETED: return "COMPLETED";
         case JobStatus::FAILED: return "FAILED";
+        case JobStatus::ABORTED: return "ABORTED";
         case JobStatus::CANCELED: return "CANCELED";
         default: return "UNKNOWN";
     }

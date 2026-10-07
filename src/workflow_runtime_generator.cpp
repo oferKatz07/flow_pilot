@@ -28,6 +28,10 @@ bool WorkflowRuntimeGenerator::build_jobs_runtime_info(const json& workflow_data
         job_info.current_retry_count = 0;
         job_info.retry_delay_sec = job.value("retry_delay_sec", 0);
         job_info.retry_backoff_policy = job.value("retry_backoff_policy", "IMMEDIAT");
+        job_info.payload_size_bytes = 0;
+        if (job.contains("payload") && !job["payload"].is_null()) {
+            job_info.payload_size_bytes = static_cast<int>(job["payload"].get<std::vector<uint8_t>>().size());
+        }
 
         if (job_info.remaining_dependencies == 0) {
             ready_jobs.emplace(PrioritizedJob{job_info.job_id, job_info.job_uuid, job_info.priority});

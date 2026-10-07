@@ -898,12 +898,13 @@ bool SQLiteDatabase::update_job_status(const std::string& client_id, const std::
     bool bind_transition_time = true;
     switch (status) {
         case JobStatus::PENDING:
+        case JobStatus::RETRY_DELAY:
             sql_cmd = "UPDATE jobs SET status = ? WHERE client_id = ? AND workflow_id = ? AND job_id = ?;";
             bind_transition_time = false;
             break;
         case JobStatus::COMPLETED:
         case JobStatus::FAILED:
-        case JobStatus::CANCELED:
+        case JobStatus::ABORTED:
             sql_cmd = "UPDATE jobs SET status = ?, completed_at = ? WHERE client_id = ? AND workflow_id = ? AND job_id = ?;";
             break;
         case JobStatus::RUNNING:
@@ -1104,7 +1105,7 @@ bool SQLiteDatabase::fail_all_jobs_waiting_to_run(const std::string& client_id, 
         return false;
     }
 
-    sqlite3_bind_int(stmt,  1, to_int(JobStatus::CANCELED));
+    sqlite3_bind_int(stmt,  1, to_int(JobStatus::ABORTED));
     sqlite3_bind_text(stmt, 2, client_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_text(stmt, 3, workflow_id.c_str(), -1, SQLITE_STATIC);
     sqlite3_bind_int(stmt,  4, to_int(JobStatus::PENDING));

@@ -310,6 +310,75 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobPromotesWaitingReadyJobAndPersi
     ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
 }
 
+TEST_F(CompletionHandlerTest, ProcessCompletedJobUnblocksDependentJobAndPersistsQueuedStatus)
+{
+    CompletionHandler handler(false);
+    const WorkflowIdentity identity{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string completed_job_id = "completed-job-" + generate_unique_id();
+    const std::string dependent_job_id = "dependent-job-" + generate_unique_id();
+
+    persist_sqlite_workflow(
+        ioc_,
+        identity,
+        {{completed_job_id, JobStatus::RUNNING}, {dependent_job_id, JobStatus::PENDING}});
+
+    auto completed_job = make_redis_job(completed_job_id, JobStatus::RUNNING, 30, 3, 0);
+    completed_job.successors = {dependent_job_id};
+    auto dependent_job = make_redis_job(dependent_job_id, JobStatus::PENDING, 10, 3, 0);
+    dependent_job.remaining_dependencies = 1;
+    auto runtime = make_redis_runtime(
+        identity,
+        WorkflowStatus::RUNNING,
+        2,
+        1,
+        {completed_job, dependent_job});
+    runtime.workflow.pending_jobs = 1;
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    JobCompletionData completion;
+    completion.identity = identity;
+    completion.job_id = completed_job_id;
+    completion.status = JobStatus::COMPLETED;
+    completion.error_code = StatusCodes::OK;
+
+    ASSERT_TRUE(run_async(ioc_, handler.process_completed_jobs(completion)));
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(identity, workflow_fields)));
+    EXPECT_EQ(workflow_fields["completed_jobs"], "1");
+    EXPECT_EQ(workflow_fields["pending_jobs"], "0");
+    EXPECT_EQ(workflow_fields["reserved_execution_slots"], "1");
+
+    std::unordered_map<std::string, std::string> dependent_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(identity, dependent_job_id),
+        dependent_fields)));
+    EXPECT_EQ(dependent_fields["status"], std::string(to_string(JobStatus::QUEUED)));
+    EXPECT_EQ(dependent_fields["remaining_dependencies"], "0");
+
+    std::string execution_queue_member;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_dequeue_command_async(
+        "fp:execution_queue",
+        execution_queue_member)));
+    EXPECT_EQ(execution_queue_member, RedisKeys::job_key(identity, dependent_job_id));
+
+    std::vector<WorkflowJob> sqlite_jobs;
+    ASSERT_TRUE(run_async(ioc_, DBFactory::get().get_all_jobs_for_workflow_async(
+        identity.client_id,
+        identity.workflow_id,
+        sqlite_jobs)));
+    ASSERT_EQ(sqlite_jobs.size(), 2u);
+    for (const auto& job : sqlite_jobs) {
+        if (job.job_id == completed_job_id) {
+            EXPECT_EQ(job.status, JobStatus::COMPLETED);
+        } else if (job.job_id == dependent_job_id) {
+            EXPECT_EQ(job.status, JobStatus::QUEUED);
+        }
+    }
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
 TEST_F(CompletionHandlerTest, ProcessCompletedJobInternalFailureFailsWorkflow)
 {
     CompletionHandler handler(false);
@@ -363,7 +432,7 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobInternalFailureFailsWorkflow)
         if (job.job_id == completed_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
         } else if (job.job_id == waiting_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 
@@ -420,7 +489,7 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobRepairsSqliteWhenWorkflowRuntim
             {running_job_id, JobStatus::RUNNING},
             {completed_job_id, JobStatus::COMPLETED},
             {failed_job_id, JobStatus::FAILED},
-            {canceled_job_id, JobStatus::CANCELED}
+            {canceled_job_id, JobStatus::ABORTED}
         });
 
     JobCompletionData completion;
@@ -448,7 +517,7 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobRepairsSqliteWhenWorkflowRuntim
         if (job.job_id == pending_job_id ||
             job.job_id == ready_job_id ||
             job.job_id == queued_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         } else if (job.job_id == running_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
         } else if (job.job_id == completed_job_id) {
@@ -456,7 +525,7 @@ TEST_F(CompletionHandlerTest, ProcessCompletedJobRepairsSqliteWhenWorkflowRuntim
         } else if (job.job_id == failed_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
         } else if (job.job_id == canceled_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 }
@@ -513,7 +582,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobFailsWorkflowWhenJobRuntimeIsMissi
         if (job.job_id == failed_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
         } else if (job.job_id == waiting_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 
@@ -600,7 +669,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobSchedulesRetryPromotesWaitingReady
         identity,
         {{failed_job_id, JobStatus::RUNNING}, {ready_job_id, JobStatus::READY}});
 
-    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 30, 3, 0);
+    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 30, 1, 0);
     auto ready_job = make_redis_job(ready_job_id, JobStatus::READY, 10, 3, 0);
     auto runtime = make_redis_runtime(
         identity,
@@ -627,7 +696,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobSchedulesRetryPromotesWaitingReady
     ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
         RedisKeys::job_key(identity, failed_job_id),
         failed_job_fields)));
-    EXPECT_EQ(failed_job_fields["status"], std::string(to_string(JobStatus::PENDING)));
+    EXPECT_EQ(failed_job_fields["status"], std::string(to_string(JobStatus::RETRY_DELAY)));
     EXPECT_EQ(failed_job_fields["current_retry_count"], "1");
 
     std::unordered_map<std::string, std::string> ready_job_fields;
@@ -656,7 +725,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobSchedulesRetryPromotesWaitingReady
     ASSERT_EQ(sqlite_jobs.size(), 2u);
     for (const auto& job : sqlite_jobs) {
         if (job.job_id == failed_job_id) {
-            EXPECT_EQ(job.status, JobStatus::PENDING);
+            EXPECT_EQ(job.status, JobStatus::RETRY_DELAY);
         } else if (job.job_id == ready_job_id) {
             EXPECT_EQ(job.status, JobStatus::QUEUED);
         }
@@ -675,10 +744,10 @@ TEST_F(CompletionHandlerTest, RetryHandlerPromotesRetriedJobAndPersistsQueuedSta
     persist_sqlite_workflow(
         ioc_,
         identity,
-        {{completed_job_id, JobStatus::COMPLETED}, {retry_job_id, JobStatus::PENDING}});
+        {{completed_job_id, JobStatus::COMPLETED}, {retry_job_id, JobStatus::RETRY_DELAY}});
 
     auto completed_job = make_redis_job(completed_job_id, JobStatus::COMPLETED, 10, 3, 0);
-    auto retry_job = make_redis_job(retry_job_id, JobStatus::PENDING, 30, 3, 1);
+    auto retry_job = make_redis_job(retry_job_id, JobStatus::RETRY_DELAY, 30, 3, 1);
     auto runtime = make_redis_runtime(
         identity,
         WorkflowStatus::RUNNING,
@@ -790,7 +859,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndC
         identity,
         {{failed_job_id, JobStatus::RUNNING}, {waiting_job_id, JobStatus::QUEUED}});
 
-    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 30, 1, 0);
+    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 30, 1, 1);
     auto waiting_job = make_redis_job(waiting_job_id, JobStatus::QUEUED, 10, 1, 0);
     auto runtime = make_redis_runtime(
         identity,
@@ -843,7 +912,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobExhaustingRetriesFailsWorkflowAndC
         if (job.job_id == failed_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
         } else if (job.job_id == waiting_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 }
@@ -882,7 +951,7 @@ TEST_F(CompletionHandlerTest, ProcessCanceledJobDoesNotRetryAndFailsWorkflow)
     JobCompletionData completion;
     completion.identity = identity;
     completion.job_id = canceled_job_id;
-    completion.status = JobStatus::CANCELED;
+    completion.status = JobStatus::ABORTED;
     completion.error_code = StatusCodes::STATUS_UPDATED_FAILURE;
 
     ASSERT_TRUE(run_async(ioc_, handler.process_completed_jobs(completion)));
@@ -911,9 +980,9 @@ TEST_F(CompletionHandlerTest, ProcessCanceledJobDoesNotRetryAndFailsWorkflow)
     ASSERT_EQ(sqlite_jobs.size(), 2u);
     for (const auto& job : sqlite_jobs) {
         if (job.job_id == canceled_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         } else if (job.job_id == waiting_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 }
@@ -978,7 +1047,7 @@ TEST_F(CompletionHandlerTest, ProcessUnsupportedCompletionStatusTreatsJobAsInter
         if (job.job_id == failed_job_id) {
             EXPECT_EQ(job.status, JobStatus::FAILED);
         } else if (job.job_id == waiting_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 }
@@ -1004,7 +1073,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobPersistsConservativeFailureWhenRed
             {queued_job_id, JobStatus::QUEUED}
         });
 
-    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 50, 1, 0);
+    auto failed_job = make_redis_job(failed_job_id, JobStatus::RUNNING, 50, 1, 1);
     auto completed_job = make_redis_job(completed_job_id, JobStatus::COMPLETED, 40, 1, 0);
     auto running_job = make_redis_job(running_job_id, JobStatus::RUNNING, 30, 1, 0);
     auto pending_execution_job = make_redis_job(pending_execution_job_id, JobStatus::PENDING_EXECUTION, 20, 1, 0);
@@ -1054,7 +1123,7 @@ TEST_F(CompletionHandlerTest, ProcessFailedJobPersistsConservativeFailureWhenRed
         } else if (job.job_id == pending_execution_job_id) {
             EXPECT_EQ(job.status, JobStatus::PENDING_EXECUTION);
         } else if (job.job_id == queued_job_id) {
-            EXPECT_EQ(job.status, JobStatus::CANCELED);
+            EXPECT_EQ(job.status, JobStatus::ABORTED);
         }
     }
 

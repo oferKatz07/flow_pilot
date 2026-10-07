@@ -25,6 +25,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_runtime_async(const Wor
         {"current_retry_count", std::to_string(job_data.current_retry_count)},
         {"retry_delay_sec", std::to_string(job_data.retry_delay_sec)},
         {"retry_backoff_policy", job_data.retry_backoff_policy},
+        {"payload_size_bytes", std::to_string(job_data.payload_size_bytes)},
         {"owned_by", ""},
         {"start_run_time", ""}
     };
@@ -91,6 +92,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(RedisCo
         job_data.current_retry_count = std::stoi(job_fields.at("current_retry_count"));
         job_data.retry_delay_sec = std::stoi(job_fields.at("retry_delay_sec"));
         job_data.retry_backoff_policy = job_fields.at("retry_backoff_policy");
+        const auto payload_size_it = job_fields.find("payload_size_bytes");
+        job_data.payload_size_bytes = payload_size_it == job_fields.end() ? 0 : std::stoi(payload_size_it->second);
     } catch (const std::exception& e) {
         Logger::get_logger()->error("fetch_job_runtime_async- job {} runtime data is invalid: {}", job_key, e.what());
         co_return false;
@@ -119,7 +122,7 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::try_set_job_to_running_async(Re
         std::string(to_string(WorkflowStatus::CANCELED)),
         std::string(to_string(JobStatus::PENDING_EXECUTION)),
         std::string(to_string(JobStatus::RUNNING)),
-        std::string(to_string(JobStatus::CANCELED))
+        std::string(to_string(JobStatus::ABORTED))
     };
 
     const std::string lua_script = R"lua(

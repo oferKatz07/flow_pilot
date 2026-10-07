@@ -32,7 +32,7 @@ void WorkerThread::run_worker_loop() {
             boost::asio::use_future);
 
         if (!start_transition.get()) {
-            completion_data.status = JobStatus::CANCELED;
+            completion_data.status = JobStatus::ABORTED;
             completion_data.error_code = StatusCodes::STATUS_UPDATED_FAILURE;
             update_completion_handler(completion_data);
             continue;

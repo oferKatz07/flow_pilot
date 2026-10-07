@@ -6,7 +6,7 @@ FlowPilot is a modern backend infrastructure project that explores production-gr
 
 The project focuses on the engineering challenges behind reliable distributed systems rather than workflow business logic. Its architecture emphasizes idempotent request admission, dependency-aware scheduling, durable request auditing and workflow persistence, and scalable asynchronous execution.
 
-The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY -> QUEUED -> PENDING_EXECUTION -> RUNNING job transitions, runtime-owned scheduler/completion/retry components, worker dispatch, completion handling, delayed retry handling, clean shutdown, and recovery.
+The admission subsystem is feature-complete. Current development is focused on the workflow execution engine: Redis-backed runtime state, explicit READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> RETRY_DELAY job transitions, runtime-owned scheduler/completion/retry components, worker dispatch, completion handling, delayed retry handling, clean shutdown, and recovery.
 
 FlowPilot is being developed as a portfolio-quality system architecture project demonstrating modern C++ backend design, concurrent programming, and infrastructure engineering.
 
@@ -165,10 +165,10 @@ FlowPilot separates dependency readiness, workflow execution-slot reservation, s
 The current runtime job lifecycle is:
 
 ```text
-PENDING -> READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> COMPLETED | FAILED | CANCELED
+PENDING -> READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> RETRY_DELAY | COMPLETED | FAILED | ABORTED
 ```
 
-`READY` means dependencies are satisfied. `QUEUED` means the workflow has reserved an execution slot and the job is eligible for scheduler dispatch. `PENDING_EXECUTION` means a scheduler has claimed ownership of the job, but a worker has not started it yet. `RUNNING` begins only when a worker fetches the job and the execution timer starts.
+`READY` means dependencies are satisfied. `QUEUED` means the workflow has reserved an execution slot and the job is eligible for scheduler dispatch. `PENDING_EXECUTION` means a scheduler has claimed ownership of the job, but a worker has not started it yet. `RUNNING` begins only when a worker fetches the job and the execution timer starts. `RETRY_DELAY` means a failed attempt is parked until its retry deadline expires.
 
 Redis is the runtime authority for these transitions during execution, while SQLite persists durable status and timestamp history.
 
@@ -366,7 +366,7 @@ The new multi-component runtime also exposes the next data-integrity work clearl
 
 ### Phase 2 — Workflow Execution ✅
 
-- Explicit PENDING/READY/QUEUED/PENDING_EXECUTION/RUNNING job lifecycle
+- Explicit PENDING/READY/QUEUED/PENDING_EXECUTION/RUNNING/RETRY_DELAY job lifecycle
 - Workflow execution-slot reservation
 - Priority-based Redis execution queue
 - Scheduler ownership for claimed jobs

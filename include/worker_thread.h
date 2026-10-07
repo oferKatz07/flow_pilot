@@ -19,9 +19,9 @@ struct JobExeData {
     WorkflowIdentity identity;
     std::string job_id;
     std::string job_name;
-    size_t payload_size_bytes;
+    size_t payload_size_bytes = 0;
     std::vector<uint8_t> payload;
-    JobStatus status;
+    JobStatus status = JobStatus::UNKNOWN;
 };
 
 struct JobCompletionData;

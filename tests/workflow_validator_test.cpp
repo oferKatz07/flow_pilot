@@ -708,7 +708,7 @@ TEST_F(WorkflowAdmissionServiceTest, RuntimeCreationFailureFailsWorkflowCancelsU
     ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_jobs_for_workflow(client_id, workflow_id, jobs));
     ASSERT_EQ(jobs.size(), 3u);
     auto counts = count_job_statuses(jobs);
-    EXPECT_EQ(counts[JobStatus::CANCELED], 3);
+    EXPECT_EQ(counts[JobStatus::ABORTED], 3);
 
     EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_key(identity)));
     EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)));
@@ -751,7 +751,7 @@ TEST_F(WorkflowAdmissionServiceTest, QueuePublishFailureFailsWorkflowCancelsUnex
     ASSERT_TRUE(SQLiteDatabase::get_instance().get_all_jobs_for_workflow(client_id, workflow_id, jobs));
     ASSERT_EQ(jobs.size(), 4u);
     auto counts = count_job_statuses(jobs);
-    EXPECT_EQ(counts[JobStatus::CANCELED], 4);
+    EXPECT_EQ(counts[JobStatus::ABORTED], 4);
 
     EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_key(identity)));
     EXPECT_FALSE(redis_key_exists(shared_redis_ioc, *redis, RedisKeys::workflow_waiting_jobs_key(identity)));

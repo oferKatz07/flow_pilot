@@ -79,7 +79,7 @@ struct JobRuntimeData {
     int max_retries = 0;
     int current_retry_count = 0;
     int retry_delay_sec;
-    int payload_size_bytes;
+    int payload_size_bytes = 0;
     std::string retry_backoff_policy; // Currently not used
     std::vector<std::string> successors;
 };
@@ -183,6 +183,14 @@ public:
     virtual boost::asio::awaitable<bool> increment_completed_jobs_and_complete_workflow_if_ready_async(
         const WorkflowIdentity& workflow_id,
         const std::string& last_update_time,
+        bool& workflow_completed) = 0;
+    virtual boost::asio::awaitable<bool> complete_successful_job_runtime_async(
+        RedisConnectionContext& context,
+        const WorkflowIdentity& workflow_id,
+        const std::string& completed_job_id,
+        const std::string& last_update_time,
+        std::vector<std::string>& ready_job_ids,
+        std::string& promoted_job_id,
         bool& workflow_completed) = 0;
     virtual boost::asio::awaitable<bool> complete_failed_job_runtime_async(
         const WorkflowIdentity& workflow_id,
@@ -304,6 +312,14 @@ public:
         const WorkflowIdentity& workflow_id,
         const std::string& last_update_time,
         bool& workflow_completed);
+    boost::asio::awaitable<bool> complete_successful_job_runtime_async(
+        RedisConnectionContext& context,
+        const WorkflowIdentity& workflow_id,
+        const std::string& completed_job_id,
+        const std::string& last_update_time,
+        std::vector<std::string>& ready_job_ids,
+        std::string& promoted_job_id,
+        bool& workflow_completed) override;
     boost::asio::awaitable<bool> complete_failed_job_runtime_async(
         const WorkflowIdentity& workflow_id,
         const std::string& failed_job_id,

@@ -10,7 +10,7 @@ The admission subsystem validates incoming workflows, enforces client policies a
 
 The scheduler then operates on the prepared runtime state in Redis. During normal execution, the scheduler does not access SQLite. Redis contains the runtime state required to schedule and execute jobs, while SQLite provides durable persistence and the basis for recovery.
 
-The workflow admission phase is complete. The current execution architecture uses an explicit READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> COMPLETED/FAILED/CANCELED lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, runtime-owned scheduler/completion/retry components, configurable Redis I/O threads, delayed retry scheduling, and durable execution timestamps/statuses in SQLite. Current development is focused on completing execution semantics, recovery, and operational visibility.
+The workflow admission phase is complete. The current execution architecture uses an explicit READY -> QUEUED -> PENDING_EXECUTION -> RUNNING -> RETRY_DELAY/COMPLETED/FAILED/ABORTED lifecycle, workflow-level execution-slot reservation, priority-ordered Redis scheduling, scheduler ownership, runtime-owned scheduler/completion/retry components, configurable Redis I/O threads, delayed retry scheduling, and durable execution timestamps/statuses in SQLite. Current development is focused on completing execution semantics, recovery, and operational visibility.
 
 ---
 
@@ -356,10 +356,10 @@ PENDING
    |
    +------> FAILED
    |
-   +------> CANCELED
+   +------> ABORTED
 ```
 
-A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be owned by a scheduler or running. PENDING_EXECUTION means a scheduler owns the job and is responsible for dispatching it to a worker, but execution timing has not started yet. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry is moved back to PENDING, recorded in the delayed retry queue, and retried after `retry_delay_sec` plus the current jitter policy. No separate RETRYING state is used.
+A QUEUED job has already consumed one of the workflow's execution slots, even though it may not yet be owned by a scheduler or running. PENDING_EXECUTION means a scheduler owns the job and is responsible for dispatching it to a worker, but execution timing has not started yet. A retry does not require a separate RETRYING state. Retry intent is represented by the job's retry counter together with its normal execution state. A failed attempt that is eligible for retry is moved to RETRY_DELAY, recorded in the delayed retry queue, and retried after `retry_delay_sec` plus the current jitter policy. No separate RETRYING state is used.
 
 ## Scheduler Responsibilities
 
@@ -419,7 +419,7 @@ reserved_execution_slots = QUEUED jobs + PENDING_EXECUTION jobs + RUNNING jobs
 For a reclaimed job:
 
 * If the job can be retried, recovery clears stale worker ownership metadata and routes it through the retry path, which returns the job to an executable state according to retry delay and workflow capacity.
-* If the job cannot be retried, recovery finalizes it as FAILED or CANCELED through the same completion/finalization path used by normal execution.
+* If the job cannot be retried, recovery finalizes it as FAILED or ABORTED through the same completion/finalization path used by normal execution.
 * If the scheduler itself died, another scheduler or recovery coordinator reclaims the abandoned non-terminal jobs owned by the dead scheduler.
 
 The completion handler remains the canonical place for releasing execution slots, updating workflow counters, advancing dependencies, and persisting final SQLite status. Recovery should therefore route recovered terminal outcomes through completion handling rather than duplicating completion logic.
@@ -619,19 +619,21 @@ PENDING
    |
    +------> FAILED
    |
-   +------> CANCELED
+   +------> ABORTED
 ```
 
 The current job states are:
 
-* `PENDING` — waiting for dependencies or waiting for a scheduled retry delay to expire.
+* `PENDING` — waiting for dependencies.
 * `READY` — dependencies are satisfied and the job is globally schedulable.
 * `QUEUED` — granted one of the workflow's execution slots and eligible for scheduler claim.
 * `PENDING_EXECUTION` — claimed by a scheduler and waiting for worker execution.
 * `RUNNING` — fetched by a worker; execution timing starts here.
+* `RETRY_DELAY` — failed attempt is parked until the retry deadline expires.
 * `COMPLETED` — completed successfully.
 * `FAILED` — execution failed with no further retry scheduled.
-* `CANCELED` — execution was canceled.
+* `ABORTED` — execution was aborted by workflow/runtime failure.
+* `CANCELED` — reserved for future client-requested workflow cancellation.
 
 Retry is modeled orthogonally to the state machine using the retry counter. A retry-eligible job is scheduled in the Redis retry queue and returns to READY/QUEUED after the configured delay rather than entering a separate RETRYING state.
 
@@ -645,7 +647,7 @@ When a RUNNING job reports FAILED and has retry attempts remaining, the completi
 
 * increments the job's retry count,
 * clears scheduler/worker ownership fields,
-* moves the job back to PENDING,
+* moves the job to RETRY_DELAY,
 * records a retry deadline in the Redis retry sorted set,
 * releases the workflow execution slot consumed by the failed attempt,
 * promotes another waiting READY job to QUEUED if workflow capacity is available.
@@ -659,7 +661,7 @@ retry_at_ms = now + retry_delay_sec + jitter(1ms..1000ms)
 The retry handler waits for due retry entries, removes one eligible job from the retry set, and promotes it according to workflow capacity:
 
 ```text
-PENDING retry due
+RETRY_DELAY due
        |
        | workflow running and slot available
        v
@@ -921,7 +923,7 @@ The execution model, persistence support, and process-local runtime lifecycle ha
 
 Implemented/refined:
 
-* Explicit `PENDING`, `READY`, `QUEUED`, `PENDING_EXECUTION`, `RUNNING`, `COMPLETED`, `FAILED`, and `CANCELED` job states.
+* Explicit `PENDING`, `READY`, `QUEUED`, `PENDING_EXECUTION`, `RUNNING`, `COMPLETED`, `FAILED`, and `ABORTED` job states.
 * Redis runtime support for READY/QUEUED/PENDING_EXECUTION/RUNNING lifecycle transitions, with durable SQLite support for persisted lifecycle timestamps and terminal outcomes.
 * Redis runtime representation for scheduler-visible job state.
 * Priority-aware `execution_queue` sorted-set design.

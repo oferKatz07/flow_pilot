@@ -30,11 +30,17 @@ JobStatus job_status_from_string(const std::string& value)
     if (value == to_string(JobStatus::RUNNING)) {
         return JobStatus::RUNNING;
     }
+    if (value == to_string(JobStatus::RETRY_DELAY)) {
+        return JobStatus::RETRY_DELAY;
+    }
     if (value == to_string(JobStatus::COMPLETED)) {
         return JobStatus::COMPLETED;
     }
     if (value == to_string(JobStatus::FAILED)) {
         return JobStatus::FAILED;
+    }
+    if (value == to_string(JobStatus::ABORTED)) {
+        return JobStatus::ABORTED;
     }
     if (value == to_string(JobStatus::CANCELED)) {
         return JobStatus::CANCELED;
