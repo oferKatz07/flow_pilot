@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "completion_handler.h"
+#include "retry_handler.h"
 #include "scheduler.h"
 
 namespace flow_pilot {
@@ -19,6 +20,7 @@ struct FlowPilotRuntimeStatus {
     std::size_t redis_io_threads{0};
     std::size_t scheduler_count{0};
     std::size_t completion_handler_count{0};
+    std::size_t retry_handler_count{0};
     bool started{false};
     bool shutting_down{false};
 };
@@ -57,6 +59,7 @@ private:
     mutable std::mutex mutex_;
     std::vector<std::unique_ptr<scheduler>> schedulers_;
     std::vector<std::unique_ptr<CompletionHandler>> completion_handlers_;
+    std::unique_ptr<RetryHandler> retry_handler_;
     std::vector<std::thread> redis_io_threads_;
     bool started_{false};
     bool shutting_down_{false};

@@ -27,6 +27,8 @@ constexpr const char* EXECUTION_QUEUE_KEY = "fp:execution_queue";
 constexpr const char* EXECUTION_QUEUE_READY_CHANNEL = "fp:execution_queue:ready";
 constexpr const char* JOB_COMPLETION_STREAM_KEY = "fp:job_completion_stream";
 constexpr const char* JOB_COMPLETION_READY_CHANNEL = "fp:job_completion_stream:ready";
+constexpr const char* JOB_RETRY_STREAM_KEY = "fp:job_retry_stream";
+constexpr const char* JOB_RETRY_READY_CHANNEL = "fp:job_retry_stream:ready";
 
 std::string trim_crlf(std::string line)
 {
@@ -617,6 +619,83 @@ boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job
         }
 
         Logger::get_logger()->error("wait_for_job_completion_event_async - failed while waiting: {}",
+                                    ex.what());
+        co_return JobCompletionWaitResult::ERROR;
+    }
+}
+
+boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job_retry_event_async(
+    std::chrono::milliseconds timeout)
+{
+    co_return co_await wait_for_job_retry_event_async(*default_connection_context_, timeout);
+}
+
+boost::asio::awaitable<JobCompletionWaitResult> RedisDatabaseAsync::wait_for_job_retry_event_async(
+    RedisConnectionContext& context,
+    std::chrono::milliseconds timeout)
+{
+    ImplAsync subscriber(ioc_);
+    std::string error_message;
+    if (!subscriber.connect(host_, port_, error_message)) {
+        Logger::get_logger()->error("wait_for_job_retry_event_async - failed to connect subscriber: {}",
+                                    error_message);
+        co_return JobCompletionWaitResult::ERROR;
+    }
+
+    auto timed_out = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<boost::asio::steady_timer> timer;
+
+    try {
+        if (!co_await subscriber.subscribe_async(JOB_RETRY_READY_CHANNEL)) {
+            Logger::get_logger()->error("wait_for_job_retry_event_async - received invalid subscribe reply");
+            co_return JobCompletionWaitResult::ERROR;
+        }
+
+        std::vector<std::string> values;
+        const std::string due_check_lua = R"lua(
+            local retry_stream_key = KEYS[1]
+            local now = redis.call('TIME')
+            local now_ms = (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+            local entries = redis.call('ZRANGEBYSCORE', retry_stream_key, '-inf', now_ms, 'LIMIT', 0, 1)
+            if #entries == 0 then
+                return {0}
+            end
+            return {1}
+        )lua";
+        if (!co_await context.command_executor().execute_lua_script_async(
+                due_check_lua,
+                {JOB_RETRY_STREAM_KEY},
+                {},
+                values)) {
+            Logger::get_logger()->error("wait_for_job_retry_event_async - failed to check retry stream");
+            co_return JobCompletionWaitResult::ERROR;
+        }
+
+        if (values.size() == 1 && values[0] == "1") {
+            co_return JobCompletionWaitResult::EVENT;
+        }
+
+        timer = std::make_shared<boost::asio::steady_timer>(ioc_, timeout);
+        timer->async_wait([timed_out, &subscriber](const boost::system::error_code& ec) {
+            if (!ec) {
+                timed_out->store(true, std::memory_order_release);
+                subscriber.close();
+            }
+        });
+
+        co_await subscriber.wait_for_subscribed_pubsub_message_async(JOB_RETRY_READY_CHANNEL);
+        timer->cancel();
+        co_return JobCompletionWaitResult::EVENT;
+    } catch (const std::exception& ex) {
+        if (timer) {
+            timer->cancel();
+        }
+
+        if (timed_out->load(std::memory_order_acquire)) {
+            co_return JobCompletionWaitResult::TIMEOUT;
+        }
+
+        Logger::get_logger()->error("wait_for_job_retry_event_async - failed while waiting: {}",
                                     ex.what());
         co_return JobCompletionWaitResult::ERROR;
     }

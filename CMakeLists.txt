@@ -49,6 +49,7 @@ set(FLOW_PILOT_SOURCES
     src/redis_db_async_completion.cpp
     src/redis_db_async_execution_queue.cpp
     src/redis_db_async_jobs.cpp
+    src/redis_db_async_retry.cpp
     src/redis_db_async_workflow.cpp
     src/redis_keys.cpp
     src/sqlite_db.cpp
@@ -64,6 +65,7 @@ set(FLOW_PILOT_SOURCES
     src/workflow_admission_service.cpp
     src/flow_pilot_runtime.cpp
     src/completion_handler.cpp
+    src/retry_handler.cpp
     src/scheduler.cpp
     src/worker_thread.cpp
 )

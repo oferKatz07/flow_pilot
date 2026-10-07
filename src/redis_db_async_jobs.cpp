@@ -8,6 +8,11 @@
 #include "redis_db_async.h"
 
 namespace flow_pilot {
+namespace {
+
+constexpr const char* JOB_RETRY_STREAM_KEY = "fp:job_retry_stream";
+
+} // namespace
 
 boost::asio::awaitable<bool> RedisDatabaseAsync::set_job_runtime_async(const WorkflowIdentity& workflow_id, const JobRuntimeData& job_data) {
     const auto job_key = RedisKeys::job_key(workflow_id, job_data.job_id);
@@ -56,12 +61,6 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::update_job_runtime_async(
     co_return co_await context.command_executor().execute_hset_command_async(job_key, fields);
 }
 
-boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
-                                                                         const std::string& job_id,
-                                                                         JobRuntimeData& job_data) const {
-    co_return co_await fetch_job_runtime_async(*default_connection_context_, workflow_id, job_id, job_data);
-}
-
 boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(RedisConnectionContext& context,
                                                                          const WorkflowIdentity& workflow_id,
                                                                          const std::string& job_id,
@@ -72,21 +71,30 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::fetch_job_runtime_async(RedisCo
         Logger::get_logger()->error("fetch_job_runtime_async- Failed to fetched job {} fileds!!!", job_key);
         co_return false;
     }
-
-    job_data.job_id = job_id;
-    job_data.status = job_fields["status"];
-    job_data.remaining_dependencies = std::stoi(job_fields["remaining_dependencies"]);
-    job_data.priority = std::stoi(job_fields["priority"]);
-    job_data.timeout_sec = std::stoi(job_fields["timeout_sec"]);
-    try {
-        job_data.start_run_time = std::stoll(job_fields["start_run_time"]);
-    } catch (...) {
-        job_data.start_run_time = 0;
+    if (job_fields.empty()) {
+        Logger::get_logger()->error("fetch_job_runtime_async- job {} runtime data is missing", job_key);
+        co_return false;
     }
-    job_data.max_retries = std::stoi(job_fields["max_retries"]);
-    job_data.current_retry_count = std::stoi(job_fields["current_retry_count"]);
-    job_data.retry_delay_sec = std::stoi(job_fields["retry_delay_sec"]);
-    job_data.retry_backoff_policy = job_fields["retry_backoff_policy"];
+
+    try {
+        job_data.job_id = job_id;
+        job_data.status = job_fields.at("status");
+        job_data.remaining_dependencies = std::stoi(job_fields.at("remaining_dependencies"));
+        job_data.priority = std::stoi(job_fields.at("priority"));
+        job_data.timeout_sec = std::stoi(job_fields.at("timeout_sec"));
+        try {
+            job_data.start_run_time = std::stoll(job_fields.at("start_run_time"));
+        } catch (...) {
+            job_data.start_run_time = 0;
+        }
+        job_data.max_retries = std::stoi(job_fields.at("max_retries"));
+        job_data.current_retry_count = std::stoi(job_fields.at("current_retry_count"));
+        job_data.retry_delay_sec = std::stoi(job_fields.at("retry_delay_sec"));
+        job_data.retry_backoff_policy = job_fields.at("retry_backoff_policy");
+    } catch (const std::exception& e) {
+        Logger::get_logger()->error("fetch_job_runtime_async- job {} runtime data is invalid: {}", job_key, e.what());
+        co_return false;
+    }
 
     co_return true;
 }
@@ -260,6 +268,8 @@ boost::asio::awaitable<bool> RedisDatabaseAsync::delete_all_workflow_jobs_async(
         if (!ok || value == 0) {
             Logger::get_logger()->info("Failed to delete job runtime data for job_id: {} in workflow_id: {}", job_data.job_id, workflow_id.workflow_id);
         }
+        std::vector<std::string> retry_members{job_key};
+        co_await command_executor_->execute_zset_remove_command_async(JOB_RETRY_STREAM_KEY, std::move(retry_members));
         const auto successors_key = RedisKeys::successors_key(workflow_id, job_data.job_id);
         args = {"DEL", successors_key};
         value = 0;

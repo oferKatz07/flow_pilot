@@ -50,10 +50,14 @@ private:
     boost::asio::awaitable<bool> handle_job_retry(
         const JobCompletionData& completion_data,
         int updated_retry_count,
-        int max_retries);
+        int max_retries,
+        int retry_delay_sec);
     boost::asio::awaitable<bool> persist_failed_workflow_after_runtime_failure(
         const WorkflowIdentity& identity,
-        const std::string& failed_job_id);
+        const std::string& failed_job_id,
+        JobStatus terminal_job_status = JobStatus::FAILED);
+    boost::asio::awaitable<bool> persist_failed_workflow_after_missing_runtime(
+        const WorkflowIdentity& identity);
     boost::asio::awaitable<bool> handle_job_canceled(
         const JobCompletionData& completion_data,
         const std::unordered_map<std::string, std::string>& workflow_fields);

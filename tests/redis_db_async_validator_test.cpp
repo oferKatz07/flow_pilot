@@ -859,6 +859,194 @@ TEST_F(RedisDatabaseAsyncValidatorTest, DeleteWorkflowRuntimeDataCleansWaitingRe
     EXPECT_EQ(waiting_count, 0);
 }
 
+TEST_F(RedisDatabaseAsyncValidatorTest, ReleaseExecutionSlotPromotesWaitingReadyJobToExecutionQueue)
+{
+    run_async(ioc_, redis_->clear_execution_queue_async());
+
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string completed_job_id = "completed-" + generate_unique_id();
+    const std::string ready_job_id = "ready-" + generate_unique_id();
+
+    WorkflowRuntimeInfo runtime;
+    runtime.identity = workflow_id;
+    runtime.workflow.workflow_id = workflow_id.workflow_id;
+    runtime.workflow.status = to_string(WorkflowStatus::RUNNING);
+    runtime.workflow.max_concurrent_jobs = 1;
+    runtime.workflow.reserved_execution_slots = 1;
+    runtime.workflow.max_runtime_sec = 60;
+    runtime.workflow.total_jobs = 2;
+    runtime.workflow.pending_jobs = 0;
+    runtime.workflow.completed_jobs = 0;
+    runtime.workflow.failed_jobs = 0;
+    runtime.jobs = {
+        make_job_runtime(completed_job_id, JobStatus::RUNNING, 0, 30),
+        make_job_runtime(ready_job_id, JobStatus::READY, 0, 20)
+    };
+    boost::uuids::time_generator_v7 gen;
+    runtime.ready_job_list = {{ready_job_id, gen(), 20}};
+
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    std::string promoted_job_id;
+    ASSERT_TRUE(run_async(ioc_, redis_->release_execution_slot_and_promote_ready_job_async(
+        workflow_id,
+        promoted_job_id)));
+    EXPECT_EQ(promoted_job_id, ready_job_id);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["reserved_execution_slots"], "1");
+
+    std::unordered_map<std::string, std::string> promoted_job_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(workflow_id, ready_job_id),
+        promoted_job_fields)));
+    EXPECT_EQ(promoted_job_fields["status"], std::string(to_string(JobStatus::QUEUED)));
+
+    long long waiting_count = -1;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"ZCARD", RedisKeys::workflow_waiting_jobs_key(workflow_id)},
+        waiting_count)));
+    EXPECT_EQ(waiting_count, 0);
+
+    std::string execution_queue_member;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_dequeue_command_async(
+        "fp:execution_queue",
+        execution_queue_member)));
+    EXPECT_EQ(execution_queue_member, RedisKeys::job_key(workflow_id, ready_job_id));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, ScheduleJobRetryReleasesSlotAndPromotesWaitingReadyJobToExecutionQueue)
+{
+    run_async(ioc_, redis_->clear_execution_queue_async());
+    long long deleted = 0;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"DEL", "fp:job_retry_stream"},
+        deleted)));
+
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string retry_job_id = "retry-" + generate_unique_id();
+    const std::string ready_job_id = "ready-" + generate_unique_id();
+
+    WorkflowRuntimeInfo runtime;
+    runtime.identity = workflow_id;
+    runtime.workflow.workflow_id = workflow_id.workflow_id;
+    runtime.workflow.status = to_string(WorkflowStatus::RUNNING);
+    runtime.workflow.max_concurrent_jobs = 1;
+    runtime.workflow.reserved_execution_slots = 1;
+    runtime.workflow.max_runtime_sec = 60;
+    runtime.workflow.total_jobs = 2;
+    runtime.workflow.pending_jobs = 0;
+    runtime.workflow.completed_jobs = 0;
+    runtime.workflow.failed_jobs = 0;
+    runtime.jobs = {
+        make_job_runtime(retry_job_id, JobStatus::RUNNING, 0, 30),
+        make_job_runtime(ready_job_id, JobStatus::READY, 0, 20)
+    };
+    boost::uuids::time_generator_v7 gen;
+    runtime.ready_job_list = {{ready_job_id, gen(), 20}};
+
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    std::string promoted_job_id;
+    ASSERT_TRUE(run_async(ioc_, redis_->schedule_job_retry_async(
+        workflow_id,
+        retry_job_id,
+        1,
+        9999999999999LL,
+        promoted_job_id)));
+    EXPECT_EQ(promoted_job_id, ready_job_id);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["reserved_execution_slots"], "1");
+
+    std::unordered_map<std::string, std::string> retry_job_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(workflow_id, retry_job_id),
+        retry_job_fields)));
+    EXPECT_EQ(retry_job_fields["status"], std::string(to_string(JobStatus::PENDING)));
+    EXPECT_EQ(retry_job_fields["current_retry_count"], "1");
+    EXPECT_TRUE(retry_job_fields["start_run_time"].empty());
+    EXPECT_TRUE(retry_job_fields["owned_by"].empty());
+
+    std::unordered_map<std::string, std::string> promoted_job_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(workflow_id, ready_job_id),
+        promoted_job_fields)));
+    EXPECT_EQ(promoted_job_fields["status"], std::string(to_string(JobStatus::QUEUED)));
+
+    long long retry_count = -1;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"ZCARD", "fp:job_retry_stream"},
+        retry_count)));
+    EXPECT_EQ(retry_count, 1);
+
+    std::string execution_queue_member;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_dequeue_command_async(
+        "fp:execution_queue",
+        execution_queue_member)));
+    EXPECT_EQ(execution_queue_member, RedisKeys::job_key(workflow_id, ready_job_id));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
+TEST_F(RedisDatabaseAsyncValidatorTest, PromoteRetryJobUsesOpenSlotAndQueuesRetriedJobForExecution)
+{
+    run_async(ioc_, redis_->clear_execution_queue_async());
+
+    const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};
+    const std::string retry_job_id = "retry-" + generate_unique_id();
+
+    WorkflowRuntimeInfo runtime;
+    runtime.identity = workflow_id;
+    runtime.workflow.workflow_id = workflow_id.workflow_id;
+    runtime.workflow.status = to_string(WorkflowStatus::RUNNING);
+    runtime.workflow.max_concurrent_jobs = 1;
+    runtime.workflow.reserved_execution_slots = 0;
+    runtime.workflow.max_runtime_sec = 60;
+    runtime.workflow.total_jobs = 3;
+    runtime.workflow.pending_jobs = 0;
+    runtime.workflow.completed_jobs = 2;
+    runtime.workflow.failed_jobs = 0;
+    runtime.jobs = {make_job_runtime(retry_job_id, JobStatus::PENDING, 0, 30)};
+
+    ASSERT_TRUE(run_async(ioc_, redis_->create_workflow_runtime_data_async(runtime)));
+
+    std::string promoted_job_id;
+    ASSERT_TRUE(run_async(ioc_, redis_->promote_retry_job_async(
+        workflow_id,
+        retry_job_id,
+        promoted_job_id)));
+    EXPECT_EQ(promoted_job_id, retry_job_id);
+
+    std::unordered_map<std::string, std::string> workflow_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->fetch_workflow_runtime_async(workflow_id, workflow_fields)));
+    EXPECT_EQ(workflow_fields["reserved_execution_slots"], "1");
+
+    std::unordered_map<std::string, std::string> retry_job_fields;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_hgetall_command_async(
+        RedisKeys::job_key(workflow_id, retry_job_id),
+        retry_job_fields)));
+    EXPECT_EQ(retry_job_fields["status"], std::string(to_string(JobStatus::QUEUED)));
+
+    long long waiting_count = -1;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_integer_command_async(
+        {"ZCARD", RedisKeys::workflow_waiting_jobs_key(workflow_id)},
+        waiting_count)));
+    EXPECT_EQ(waiting_count, 0);
+
+    std::string execution_queue_member;
+    ASSERT_TRUE(run_async(ioc_, redis_->command_executor().execute_zset_dequeue_command_async(
+        "fp:execution_queue",
+        execution_queue_member)));
+    EXPECT_EQ(execution_queue_member, RedisKeys::job_key(workflow_id, retry_job_id));
+
+    ASSERT_TRUE(run_async(ioc_, redis_->delete_workflow_runtime_data_async(runtime)));
+}
+
 TEST_F(RedisDatabaseAsyncValidatorTest, CreateWorkflowRuntimeDataFailsWhenWorkflowHashCannotBeCreated)
 {
     const WorkflowIdentity workflow_id{"client-" + generate_unique_id(), "workflow-" + generate_unique_id()};

@@ -448,8 +448,9 @@ TEST_F(WorkflowAdmissionServiceTest, AdmittedWorkflowPersistsSqliteAndRedisState
     EXPECT_EQ(workflow_runtime["pending_jobs"], "0");
 
     JobRuntimeData job_runtime;
+    RedisConnectionContext job_runtime_context(shared_redis_ioc);
     ASSERT_TRUE(run_async(shared_redis_ioc,
-                          redis->fetch_job_runtime_async(identity, "job-1", job_runtime)));
+                          redis->fetch_job_runtime_async(job_runtime_context, identity, "job-1", job_runtime)));
     EXPECT_EQ(job_runtime.status, std::string(to_string(JobStatus::QUEUED)));
     EXPECT_EQ(job_runtime.remaining_dependencies, 0);
 
@@ -1075,10 +1076,12 @@ TEST_F(ActualRedisDatabaseTest, CreateWorkflowRuntimeDataBootstrapsWorkflowState
     EXPECT_EQ(workflow_data["pending_jobs"], "1");
 
     JobRuntimeData job_data;
+    RedisConnectionContext job_runtime_context(shared_redis_ioc);
     ASSERT_TRUE(run_async(shared_redis_ioc,
-                          redis_->fetch_job_runtime_async(workflow_info.identity,
-                                                         "job-a",
-                                                         job_data)));
+                          redis_->fetch_job_runtime_async(job_runtime_context,
+                                                          workflow_info.identity,
+                                                          "job-a",
+                                                          job_data)));
     EXPECT_EQ(job_data.status, job1.status);
     EXPECT_EQ(job_data.remaining_dependencies, job1.remaining_dependencies);
     EXPECT_EQ(job_data.max_retries, job1.max_retries);
@@ -1110,10 +1113,12 @@ TEST_F(ActualRedisDatabaseTest, JobRuntimePayloadAndDependenciesRoundtrip) {
                           redis_->set_job_runtime_async(workflow_id, job_info)));
 
     JobRuntimeData job_data;
+    RedisConnectionContext job_runtime_context(shared_redis_ioc);
     EXPECT_TRUE(run_async(shared_redis_ioc,
-                          redis_->fetch_job_runtime_async(workflow_id,
-                                                         job_id,
-                                                         job_data)));
+                          redis_->fetch_job_runtime_async(job_runtime_context,
+                                                          workflow_id,
+                                                          job_id,
+                                                          job_data)));
     EXPECT_EQ(job_data.status, job_info.status);
     EXPECT_EQ(job_data.remaining_dependencies, job_info.remaining_dependencies);
     EXPECT_EQ(job_data.max_retries, job_info.max_retries);

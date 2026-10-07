@@ -73,11 +73,11 @@ boost::asio::awaitable<void> scheduler::scheduler_main_loop() {
         JobExeData job_info;
         // Wait for the next ready job from the redis execution queue
         if (!co_await get_next_ready_job(job_info)) {
-            break;
-        }
-
-        if (!running_.load(std::memory_order_acquire)) {
-            break;
+            if (!running_.load(std::memory_order_acquire)) {
+                break;
+            }
+            
+            continue;
         }
 
         // Get the job payload from the workflow runtime data

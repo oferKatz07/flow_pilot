@@ -261,6 +261,7 @@ RuntimeStatusHandler::handle(const HandlerCtxData& ctx) {
     response["redis_io_threads"] = runtime_status.redis_io_threads;
     response["scheduler_count"] = runtime_status.scheduler_count;
     response["completion_handler_count"] = runtime_status.completion_handler_count;
+    response["retry_handler_count"] = runtime_status.retry_handler_count;
 
     co_return make_json_response(http::status::ok, ctx.keep_alive, response.dump());
 }

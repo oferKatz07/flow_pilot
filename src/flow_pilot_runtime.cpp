@@ -49,6 +49,8 @@ void FlowPilotRuntime::start()
         completion_handlers_.emplace_back(std::make_unique<CompletionHandler>());
     }
 
+    retry_handler_ = std::make_unique<RetryHandler>();
+
     schedulers_.reserve(initial_scheduler_count_);
     for (std::size_t i = 0; i < initial_scheduler_count_; ++i) {
         schedulers_.emplace_back(std::make_unique<scheduler>());
@@ -68,6 +70,7 @@ void FlowPilotRuntime::shutdown()
 {
     std::vector<std::unique_ptr<scheduler>> schedulers_to_destroy;
     std::vector<std::unique_ptr<CompletionHandler>> completion_handlers_to_destroy;
+    std::unique_ptr<RetryHandler> retry_handler_to_destroy;
     std::vector<std::thread> io_threads_to_join;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -82,13 +85,18 @@ void FlowPilotRuntime::shutdown()
         for (auto& completion_handler : completion_handlers_) {
             completion_handler->request_stop();
         }
+        if (retry_handler_) {
+            retry_handler_->request_stop();
+        }
 
         schedulers_to_destroy = std::move(schedulers_);
         completion_handlers_to_destroy = std::move(completion_handlers_);
+        retry_handler_to_destroy = std::move(retry_handler_);
     }
 
     schedulers_to_destroy.clear();
     completion_handlers_to_destroy.clear();
+    retry_handler_to_destroy.reset();
     redis_ioc_.stop();
 
     {
@@ -165,6 +173,7 @@ FlowPilotRuntimeStatus FlowPilotRuntime::status() const
         redis_io_threads_.size(),
         schedulers_.size(),
         completion_handlers_.size(),
+        retry_handler_ ? 1u : 0u,
         started_,
         shutting_down_
     };

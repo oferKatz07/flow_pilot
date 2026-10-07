@@ -76,8 +76,8 @@ struct JobRuntimeData {
     int priority; // Currently not used
     int timeout_sec;
     long long start_run_time = 0;
-    int max_retries;
-    int current_retry_count;
+    int max_retries = 0;
+    int current_retry_count = 0;
     int retry_delay_sec;
     int payload_size_bytes;
     std::string retry_backoff_policy; // Currently not used
@@ -103,6 +103,11 @@ struct JobCompletionData {
     std::string job_id;
     JobStatus status = JobStatus::UNKNOWN;
     StatusCodes error_code = StatusCodes::OK;
+};
+
+struct JobRetryData {
+    WorkflowIdentity identity;
+    std::string job_id;
 };
 
 enum class JobCompletionWaitResult {
@@ -213,9 +218,6 @@ public:
         const WorkflowIdentity& workflow_id,
         const std::string& job_id,
         const std::unordered_map<std::string, std::string>& fields) = 0;
-    virtual boost::asio::awaitable<bool> fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
-                                                                 const std::string& job_id,
-                                                                 JobRuntimeData& job_data) const = 0;
     virtual boost::asio::awaitable<bool> try_set_job_to_running_async(const WorkflowIdentity& workflow_id, 
                                                                       const std::string& job_id, 
                                                                       StartJobResult& result) = 0;
@@ -223,6 +225,21 @@ public:
     virtual boost::asio::awaitable<bool> dequeue_job_completion_async(JobCompletionData& message) = 0;
     virtual boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_completion_event_async(
         std::chrono::milliseconds timeout) = 0;
+    virtual boost::asio::awaitable<bool> schedule_job_retry_async(
+        const WorkflowIdentity& workflow_id,
+        const std::string& job_id,
+        int updated_retry_count,
+        long long retry_at_ms,
+        std::string& promoted_job_id) = 0;
+    virtual boost::asio::awaitable<bool> dequeue_due_job_retry_async(
+        long long now_ms,
+        JobRetryData& retry_data) = 0;
+    virtual boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_retry_event_async(
+        std::chrono::milliseconds timeout) = 0;
+    virtual boost::asio::awaitable<bool> promote_retry_job_async(
+        const WorkflowIdentity& workflow_id,
+        const std::string& job_id,
+        std::string& promoted_job_id) = 0;
     virtual boost::asio::awaitable<bool> set_job_payload_async(const WorkflowIdentity& workflow_id,
                                                                const std::string& job_id,
                                                                const std::vector<uint8_t>& payload) = 0;
@@ -345,9 +362,6 @@ public:
                                                           const WorkflowIdentity& workflow_id,
                                                           const std::string& job_id,
                                                           const std::unordered_map<std::string, std::string>& fields);
-    boost::asio::awaitable<bool> fetch_job_runtime_async(const WorkflowIdentity& workflow_id,
-                                                         const std::string& job_id,
-                                                         JobRuntimeData& job_data) const override;
     boost::asio::awaitable<bool> fetch_job_runtime_async(RedisConnectionContext& context,
                                                          const WorkflowIdentity& workflow_id,
                                                          const std::string& job_id,
@@ -370,6 +384,34 @@ public:
     boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_completion_event_async(
         RedisConnectionContext& context,
         std::chrono::milliseconds timeout);
+    boost::asio::awaitable<bool> schedule_job_retry_async(const WorkflowIdentity& workflow_id,
+                                                          const std::string& job_id,
+                                                          int updated_retry_count,
+                                                          long long retry_at_ms,
+                                                          std::string& promoted_job_id) override;
+    boost::asio::awaitable<bool> schedule_job_retry_async(RedisConnectionContext& context,
+                                                          const WorkflowIdentity& workflow_id,
+                                                          const std::string& job_id,
+                                                          int updated_retry_count,
+                                                          long long retry_at_ms,
+                                                          std::string& promoted_job_id);
+    boost::asio::awaitable<bool> dequeue_due_job_retry_async(long long now_ms,
+                                                             JobRetryData& retry_data) override;
+    boost::asio::awaitable<bool> dequeue_due_job_retry_async(RedisConnectionContext& context,
+                                                             long long now_ms,
+                                                             JobRetryData& retry_data);
+    boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_retry_event_async(
+        std::chrono::milliseconds timeout) override;
+    boost::asio::awaitable<JobCompletionWaitResult> wait_for_job_retry_event_async(
+        RedisConnectionContext& context,
+        std::chrono::milliseconds timeout);
+    boost::asio::awaitable<bool> promote_retry_job_async(const WorkflowIdentity& workflow_id,
+                                                         const std::string& job_id,
+                                                         std::string& promoted_job_id) override;
+    boost::asio::awaitable<bool> promote_retry_job_async(RedisConnectionContext& context,
+                                                         const WorkflowIdentity& workflow_id,
+                                                         const std::string& job_id,
+                                                         std::string& promoted_job_id);
     boost::asio::awaitable<bool> set_job_payload_async(const WorkflowIdentity& workflow_id,
                                                        const std::string& job_id, 
                                                        const std::vector<uint8_t>& payload) override;

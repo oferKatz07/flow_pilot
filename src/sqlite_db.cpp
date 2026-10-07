@@ -895,7 +895,12 @@ bool SQLiteDatabase::update_ready_jobs(const std::string& client_id, const std::
 bool SQLiteDatabase::update_job_status(const std::string& client_id, const std::string& workflow_id, 
                                        const std::string& job_id, const JobStatus status) {
     std::string sql_cmd;
+    bool bind_transition_time = true;
     switch (status) {
+        case JobStatus::PENDING:
+            sql_cmd = "UPDATE jobs SET status = ? WHERE client_id = ? AND workflow_id = ? AND job_id = ?;";
+            bind_transition_time = false;
+            break;
         case JobStatus::COMPLETED:
         case JobStatus::FAILED:
         case JobStatus::CANCELED:
@@ -927,10 +932,16 @@ bool SQLiteDatabase::update_job_status(const std::string& client_id, const std::
     }
 
     sqlite3_bind_int(stmt,   1, to_int(status));
-    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(std::time(nullptr)));
-    sqlite3_bind_text(stmt,  3, client_id.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt,  4, workflow_id.c_str(), -1, SQLITE_STATIC);
-    sqlite3_bind_text(stmt,  5, job_id.c_str(), -1, SQLITE_STATIC);
+    if (bind_transition_time) {
+        sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(std::time(nullptr)));
+        sqlite3_bind_text(stmt,  3, client_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt,  4, workflow_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt,  5, job_id.c_str(), -1, SQLITE_STATIC);
+    } else {
+        sqlite3_bind_text(stmt,  2, client_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt,  3, workflow_id.c_str(), -1, SQLITE_STATIC);
+        sqlite3_bind_text(stmt,  4, job_id.c_str(), -1, SQLITE_STATIC);
+    }
 
     bool ret_val = true;
     rc = sqlite3_step(stmt);
