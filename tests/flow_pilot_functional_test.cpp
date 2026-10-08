@@ -9,10 +9,12 @@
 #include <boost/beast/http.hpp>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include "completion_handler.h"
 #include "config.h"
@@ -81,22 +83,49 @@ HttpResult send_http_request(http::verb method,
     return {res.result(), res.body()};
 }
 
+json make_job(const std::string& job_id,
+              json depends_on = json::array())
+{
+    json job;
+    job["job_id"] = job_id;
+    job["type"] = "test";
+    job["priority"] = 5;
+    job["payload"] = json::array({1, 2, 3});
+    if (!depends_on.empty()) {
+        job["depends_on"] = std::move(depends_on);
+    }
+
+    return job;
+}
+
 json make_one_job_workflow(const std::string& client_id,
                            const std::string& request_id,
                            const std::string& workflow_id)
 {
-    json job;
-    job["job_id"] = "job-1";
-    job["type"] = "test";
-    job["priority"] = 5;
-    job["payload"] = json::array({1, 2, 3});
-
     json workflow;
     workflow["client_id"] = client_id;
     workflow["request_id"] = request_id;
     workflow["workflow_id"] = workflow_id;
     workflow["workflow_type"] = "functional-test";
-    workflow["jobs"] = json::array({job});
+    workflow["jobs"] = json::array({make_job("job-1")});
+    return workflow;
+}
+
+json make_multi_level_dag_workflow(const std::string& client_id,
+                                   const std::string& request_id,
+                                   const std::string& workflow_id)
+{
+    json workflow;
+    workflow["client_id"] = client_id;
+    workflow["request_id"] = request_id;
+    workflow["workflow_id"] = workflow_id;
+    workflow["workflow_type"] = "functional-dag-test";
+    workflow["jobs"] = json::array({
+        make_job("A"),
+        make_job("B", json::array({"A"})),
+        make_job("C", json::array({"A"})),
+        make_job("D", json::array({"B", "C"})),
+    });
     return workflow;
 }
 
@@ -113,6 +142,22 @@ bool wait_for_server(unsigned short port)
     }
 
     return false;
+}
+
+void clear_execution_queue(boost::asio::io_context& ioc,
+                           const std::shared_ptr<RedisDatabaseAsync>& redis)
+{
+    auto clear_queue = boost::asio::co_spawn(
+        ioc,
+        redis->clear_execution_queue_async(),
+        boost::asio::use_future);
+
+    while (clear_queue.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        ioc.run_one();
+    }
+
+    clear_queue.get();
+    ioc.restart();
 }
 
 } // namespace
@@ -135,15 +180,7 @@ TEST(FlowPilotFunctionalTest, ClientSubmitsWorkflowAndPollsStatusUntilCompleted)
     } catch (const std::exception& ex) {
         GTEST_SKIP() << "Redis server is not available: " << ex.what();
     }
-    {
-        auto clear_queue = boost::asio::co_spawn(
-            ioc,
-            redis->clear_execution_queue_async(),
-            boost::asio::use_future);
-        ioc.run();
-        clear_queue.get();
-        ioc.restart();
-    }
+    clear_execution_queue(ioc, redis);
 
     const unsigned short port = reserve_free_port();
     Config::get().server().address = "127.0.0.1";
@@ -198,6 +235,98 @@ TEST(FlowPilotFunctionalTest, ClientSubmitsWorkflowAndPollsStatusUntilCompleted)
         ASSERT_EQ(status_response["jobs"].size(), 1u);
         EXPECT_EQ(status_response["jobs"][0]["job_id"], "job-1");
         EXPECT_EQ(status_response["jobs"][0]["status"], "COMPLETED");
+    }
+
+    work_guard.reset();
+    ioc.stop();
+    if (io_thread.joinable()) {
+        io_thread.join();
+    }
+}
+
+TEST(FlowPilotFunctionalTest, MultiLevelDagCompletesEndToEnd)
+{
+    Config::get().logger().output = LogOutput::CONSOLE_ONLY;
+    Config::get().client_config().config_type = ClientDataConfig::ConfigManagerTypes::TEST_MANAGER;
+    Config::get().redis().host = "127.0.0.1";
+    Config::get().redis().port = 6379;
+#ifdef WORKFLOW_SCHEMA_PATH
+    Config::get().workflow().workflow_schema_path = WORKFLOW_SCHEMA_PATH;
+#endif
+
+    auto& ioc = flow_pilot::test::redis_ioc();
+    ioc.restart();
+    std::shared_ptr<RedisDatabaseAsync> redis;
+    try {
+        redis = RedisDatabaseAsync::init(ioc, Config::get().redis());
+    } catch (const std::exception& ex) {
+        GTEST_SKIP() << "Redis server is not available: " << ex.what();
+    }
+    clear_execution_queue(ioc, redis);
+
+    const unsigned short port = reserve_free_port();
+    Config::get().server().address = "127.0.0.1";
+    Config::get().server().port = port;
+
+    auto work_guard = asio::make_work_guard(ioc);
+    run_http_server(ioc);
+    std::thread io_thread([&ioc]() {
+        ioc.run();
+    });
+
+    ASSERT_TRUE(wait_for_server(port));
+
+    {
+        CompletionHandler completion_handler;
+        scheduler workflow_scheduler(2, 2);
+
+        const std::string client_id = "functional-client-" + generate_unique_id();
+        const std::string request_id = "functional-request-" + generate_unique_id();
+        const std::string workflow_id = "functional-dag-workflow-" + generate_unique_id();
+        const json workflow = make_multi_level_dag_workflow(client_id, request_id, workflow_id);
+
+        const auto submit = send_http_request(
+            http::verb::post,
+            port,
+            "/api/v1/workflows",
+            workflow.dump());
+        ASSERT_EQ(submit.status, http::status::accepted) << submit.body;
+
+        const std::string status_target =
+            "/api/v1/workflows/" + workflow_id + "?client_id=" + client_id;
+
+        json status_response;
+        bool completed = false;
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (std::chrono::steady_clock::now() < deadline) {
+            const auto status = send_http_request(http::verb::get, port, status_target);
+            ASSERT_EQ(status.status, http::status::ok) << status.body;
+            status_response = json::parse(status.body);
+
+            if (status_response["status"] == "COMPLETED") {
+                completed = true;
+                break;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        ASSERT_TRUE(completed) << status_response.dump();
+        ASSERT_EQ(status_response["workflow_id"], workflow_id);
+        ASSERT_EQ(status_response["client_id"], client_id);
+        ASSERT_EQ(status_response["jobs"].size(), 4u);
+
+        std::unordered_map<std::string, std::string> job_statuses;
+        for (const auto& job : status_response["jobs"]) {
+            job_statuses.emplace(job["job_id"].get<std::string>(),
+                                 job["status"].get<std::string>());
+        }
+
+        ASSERT_EQ(job_statuses.size(), 4u);
+        EXPECT_EQ(job_statuses["A"], "COMPLETED");
+        EXPECT_EQ(job_statuses["B"], "COMPLETED");
+        EXPECT_EQ(job_statuses["C"], "COMPLETED");
+        EXPECT_EQ(job_statuses["D"], "COMPLETED");
     }
 
     work_guard.reset();

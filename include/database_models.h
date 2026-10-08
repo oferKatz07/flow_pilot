@@ -137,14 +137,14 @@ enum class JobStatus : uint8_t {
     QUEUED = 2,
     PENDING_EXECUTION = 3,
     RUNNING = 4,
-    RETRY_DELAY = 8,
-    COMPLETED = 5,
-    FAILED = 6,
-    ABORTED = 7,
+    RETRY_DELAY = 5,
+    COMPLETED = 6,
+    FAILED = 7,
+    ABORTED = 8,
     CANCELED = 9,
     // UNKNOWN must remain the last enumerator.
     // Values >= UNKNOWN are considered invalid.
-    UNKNOWN = 10
+    UNKNOWN
 };
 
 // Convertion from int to JobStatus
